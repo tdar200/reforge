@@ -26,7 +26,10 @@ export function CoachReview() {
   const [configured, setConfigured] = useState(true);
 
   useEffect(() => {
-    fetch("/api/ai/review").then(async (r) => { if (r.ok) setReview(await r.json()); }).catch(() => {});
+    fetch("/api/ai/review").then(async (r) => {
+      if (r.status === 401) { window.location.href = "/login"; return; }
+      if (r.ok) setReview(await r.json());
+    }).catch(() => {});
   }, []);
 
   async function generate() {

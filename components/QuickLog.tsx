@@ -38,7 +38,10 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
     if (items.some((i) => i.kind === "set" && i.exerciseId === null)) { setError("Pick an exercise for every set before saving."); return; }
     setStatus("saving"); setError(null);
     try {
-      await api("/api/ai/commit", { method: "POST", body: JSON.stringify({ date, items }) });
+      const res = await fetch("/api/ai/commit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, items }) });
+      if (res.status === 401) { window.location.href = "/login"; return; }
+      if (res.status === 400) { setError("Some values are invalid — check the numbers."); return; }
+      if (!res.ok) { setError("Save failed — nothing was written."); return; }
       setItems(null); setNote(null); setText("");
       onSaved();
     } catch { setError("Save failed — nothing was written."); }
@@ -54,7 +57,7 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
 
   const num = (v: number, onChange: (n: number) => void, step = "any") => (
     <input className="w-16 rounded bg-neutral-800 p-1 text-right" inputMode="decimal" step={step} value={v}
-      onChange={(e) => onChange(Number(e.target.value))} />
+      onChange={(e) => { const n = Number(e.target.value); onChange(Number.isFinite(n) ? n : 0); }} />
   );
 
   return (
@@ -69,7 +72,7 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
         <button onClick={parse} disabled={!text.trim() || status !== "idle"} className="rounded bg-green-600 px-3 py-1 text-sm disabled:opacity-50">
           {status === "parsing" ? "Parsing…" : "Parse"}
         </button>
-        {items && <button onClick={save} disabled={status !== "idle"} className="rounded bg-neutral-700 px-3 py-1 text-sm disabled:opacity-50">
+        {items && items.length > 0 && <button onClick={save} disabled={status !== "idle"} className="rounded bg-neutral-700 px-3 py-1 text-sm disabled:opacity-50">
           {status === "saving" ? "Saving…" : `Save ${items.length}`}
         </button>}
       </div>
