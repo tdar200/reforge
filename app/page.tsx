@@ -6,6 +6,7 @@ import { todayIso } from "@/lib/today";
 import { dayTypeForDate, DAY_LABELS, sumDiet } from "@/lib/logic";
 import { Ring } from "@/components/Ring";
 import { QuickLog } from "@/components/QuickLog";
+import { CoachReview } from "@/components/CoachReview";
 
 type Entry = { kcal: number; proteinG: number };
 type Settings = { calorieTarget: number; proteinTarget: number };
@@ -33,6 +34,7 @@ export default function Today() {
         <Ring value={total.proteinG} max={settings.proteinTarget} label="Protein" unit="g" />
       </div>
       <QuickLog date={date} onSaved={load} />
+      <CoachReview />
       <div className="grid grid-cols-3 gap-2">
         <Link href="/workout" className="rounded bg-green-600 p-3 text-center">Workout</Link>
         <Link href="/diet" className="rounded bg-neutral-700 p-3 text-center">Add meal</Link>
