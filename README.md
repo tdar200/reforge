@@ -3,18 +3,18 @@
 A small full-stack app that turns a scrappy gym log into structured data and grounded coaching.
 Built for the Moonshot Partners technical challenge on top of a personal tracker I already used daily.
 
-**Live demo:** <url after deploy> · passcode in the submission email · **Demo video:** <Loom url>
+**Live demo:** https://reforge-plum-gamma.vercel.app · passcode in the submission email · **Demo video:** <Loom url>
 
 ## What it does
 
 - **Tracker** — 5-day program (chest/shoulders, arms, legs, back, arms), per-set logging with last-session
   overload hints, meals vs calorie/protein targets, cardio, body metrics with trend charts. PWA, dark, mobile-first.
 - **Quick log (AI)** — type one line: `bench 3x8 at 60, 20 min bike, oats + whey, weight 79.6`.
-  Claude maps it onto the exercise catalogue and food presets and returns typed proposals
+  The model maps it onto the exercise catalogue and food presets and returns typed proposals
   (sets / cardio / meals / metrics). You edit the cards, tap Save, and everything is written atomically.
   Nothing is written until you confirm.
 - **Weekly review (AI)** — the server compresses the last 14 days (top set per exercise per session,
-  daily kcal/protein vs target, cardio, weight/waist, adherence) into ~3k tokens of JSON; Claude writes a
+  daily kcal/protein vs target, cardio, weight/waist, adherence) into ~3k tokens of JSON; the model writes a
   sub-250-word review with three concrete next-week targets. Reviews are stored and shown on Today.
 
 ## Tech stack
@@ -23,12 +23,12 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 |---|---|---|
 | Frontend | Next.js 15 App Router, React 19, Tailwind | one repo, client pages + route handlers, Vercel-native |
 | API | Next.js route handlers under `app/api/**` | thin: auth → Zod → service call → JSON |
-| AI | Vercel AI SDK (`ai` v7) + `@ai-sdk/anthropic`, **Claude Sonnet 5** | see below |
+| AI | Vercel AI SDK (`ai` v7) + `@ai-sdk/openai`, **GPT-5 mini** | see below |
 | DB | Neon Postgres + Drizzle ORM (`neon-http`) | serverless-friendly; migrations in repo |
 | Auth | passcode → HS256 JWT cookie (`jose`) | single-user app; enough to gate the API |
 | Tests | vitest, 41 unit tests, no network | every AI boundary is a Zod contract so the logic is testable without a key |
 
-## How AI is used (and why Claude Sonnet 5)
+## How AI is used (and why GPT-5 mini)
 
 - **Structured parsing** (`lib/ai/parse-log.ts`): `generateText` with `Output.object({ schema })`. The system prompt
   carries the exercise catalogue (today's session first, with last weights), the food presets and parsing rules;
@@ -36,17 +36,21 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
   re-validates every id against the catalogue (`sanitizeParsed`) — the model proposes, the server and the user decide.
 - **Grounded review** (`lib/ai/review.ts`): pure `buildCoachContext` turns rows into compact JSON; the prompt forbids
   using anything outside it and fixes the output sections. Context is kept small by sending only top sets.
-- **Why Sonnet 5:** the parse call is interactive, so latency matters; Sonnet's structured-output reliability is
-  excellent for a ~15-field schema; cost is negligible at this traffic (~2–3k input tokens per parse); Opus would
-  not change the quality of a 250-word review. The provider is isolated in `lib/ai/model.ts`, so swapping models
-  or vendors is a one-line change thanks to the AI SDK.
+- **Why GPT-5 mini:** the parse call is interactive, so latency and cost matter more than raw capability;
+  the mini tier handles a ~15-field structured schema reliably, and a frontier model would not change the
+  quality of a 250-word review. Cost is negligible at this traffic (~2–3k input tokens per parse).
+- **The provider is a seam, not a dependency:** everything vendor-specific lives in `lib/ai/model.ts`; the
+  parse and review code only see the AI SDK interface. I originally built this against Claude Sonnet 5 and
+  switched vendors to OpenAI at deploy time by editing that one file — the swap also surfaced a real
+  portability lesson: reasoning models reject non-default `temperature` and count reasoning tokens against
+  `maxOutputTokens`, so those knobs can't be assumed portable across providers.
 - **Failure modes handled:** missing key → 503 + UI hint, invalid model output → 502 and the user's text is kept,
   unresolved exercise → blocked client-side and server-side (400), commit is a single `db.batch` (atomic on Neon).
 
 ## Setup
 
 1. `npm install`
-2. `cp .env.example .env` and set `DATABASE_URL` (Neon), `APP_PASSCODE`, `SESSION_SECRET`, `ANTHROPIC_API_KEY`.
+2. `cp .env.example .env` and set `DATABASE_URL` (Neon), `APP_PASSCODE`, `SESSION_SECRET`, `OPENAI_API_KEY`.
 3. `npm run db:migrate` then either `npm run db:seed` (empty program) or `npm run db:seed:demo` (3 weeks of
    deterministic synthetic history so the coach has something to review).
 4. `npm run dev` → http://localhost:3000 → enter the passcode.
@@ -55,7 +59,7 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 ## Deploy (Vercel)
 
 Import the repo, add the Neon integration (sets `DATABASE_URL`), add `APP_PASSCODE`, `SESSION_SECRET`,
-`ANTHROPIC_API_KEY`, deploy, then run `npm run db:migrate && npm run db:seed:demo` locally against the same
+`OPENAI_API_KEY`, deploy, then run `npm run db:migrate && npm run db:seed:demo` locally against the same
 `DATABASE_URL`.
 
 ## Project layout
