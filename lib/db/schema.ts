@@ -1,4 +1,5 @@
-import { pgTable, serial, integer, text, date, real, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, date, real, timestamp, jsonb } from "drizzle-orm/pg-core";
+import type { NutritionPanel } from "../ai/nutrition";
 
 export const exercises = pgTable("exercises", {
   id: serial("id").primaryKey(),
@@ -37,6 +38,7 @@ export const dietEntries = pgTable("diet_entries", {
   proteinG: real("protein_g").notNull(),
   carbsG: real("carbs_g"),
   fatG: real("fat_g"),
+  nutrition: jsonb("nutrition").$type<NutritionPanel>(),
 });
 
 export const foodPresets = pgTable("food_presets", {
