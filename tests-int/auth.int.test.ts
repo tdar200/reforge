@@ -126,6 +126,7 @@ const MATRIX: [string, string][] = [
   ["POST", "/api/ai/commit"],
   ["GET", "/api/ai/review"],
   ["POST", "/api/ai/review"],
+  ["POST", "/api/ai/nutrition"],
 ];
 
 describe("unauth matrix: every protected method → 401 without cookie", () => {

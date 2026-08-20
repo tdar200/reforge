@@ -359,11 +359,11 @@ test("/diet: manual add form (blank numbers -> 0), Save preset, and per-entry de
 
   // per-entry ✕ delete refreshes list and totals
   const delRes = page.waitForResponse((r) => r.url().includes(`/api/diet/${mealRow.id}`) && r.request().method() === "DELETE");
-  await page.locator("main ul > li").filter({ hasText: "E2E gap meal" }).getByRole("button").click();
+  await page.locator("main ul > li").filter({ hasText: "E2E gap meal" }).getByRole("button", { name: "✕" }).click();
   expect((await delRes).status()).toBe(200);
   await expect(page.locator("main ul > li")).toHaveCount(1);
   await totals(0, 0);
-  await blankRow.getByRole("button").click();
+  await blankRow.getByRole("button", { name: "✕" }).click();
   await expect(page.locator("main ul > li")).toHaveCount(0);
 });
 
