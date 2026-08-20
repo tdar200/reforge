@@ -1,7 +1,7 @@
 import { neonConfig } from "@neondatabase/serverless";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { expect, test, type Locator, type Page, type Request } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Request, type Route } from "@playwright/test";
 import type { NutritionPanel } from "../lib/ai/nutrition";
 
 const PASSCODE = process.env.APP_PASSCODE || "reforge-1b3543";
@@ -832,6 +832,429 @@ test("Analyze on a 0/0 row: the panel macros replace the row numbers and the tot
   await expect(row.getByText("640kcal · 42g", { exact: true })).toBeVisible();
   await expect(page.getByText("0kcal · 0g")).toHaveCount(0);
   await totals(640, 42);
+});
+
+// ---------------------------------------------------------------------------
+// Open Food Facts label lookup: POST /api/ai/estimate now answers with a source
+// ("label" | "estimate") and the matched product name, and the Add form prints a
+// note under it saying which one filled the blanks. All route-mocked — no live OFF.
+// ---------------------------------------------------------------------------
+
+const LABEL_NAME = "Actileaf Oat Milk";
+/**
+ * The label note, verbatim: curly quotes around the matched product, an optional portion,
+ * then the delete-and-re-add advice. The portion is "" when the answer carries no servingG,
+ * " for N g/ml" when the record supplied it, and " for N (assumed) g/ml" when the model did.
+ */
+const labelNote = (name: string, portion = "") =>
+  `From the “${name}” label${portion} — delete and re-add with your own numbers if that is the wrong product.`;
+const LABEL_NOTE = labelNote(LABEL_NAME); // LABEL_BODY carries no servingG, so no portion
+const COACH_NOTE = "Estimated by the coach — no matching product label found.";
+
+// 2.6 g protein round-trips exactly through the real column; the row renders Math.round(2.6) = 3.
+const LABEL_BODY = { kcal: 98, proteinG: 2.6, source: "label", matchedName: LABEL_NAME };
+const COACH_BODY = { kcal: 610, proteinG: 32, source: "estimate", matchedName: null };
+// Pre-OFF shape: the client must tolerate a body with neither source nor matchedName.
+const LEGACY_BODY = { kcal: 415, proteinG: 18.5 };
+
+// The note is the only direct <main> child styled text-neutral-400: the hint is
+// text-neutral-500 and the form error is text-red-400.
+const noteLine = (page: Page) => page.locator("main > p.text-neutral-400");
+
+test("Estimate source label: the note names the matched product and the row takes the label macros", async ({ page }) => {
+  const NAME = "E2E est label oat";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  await totals(0, 0);
+  const seen = await mockEstimate(page, 200, LABEL_BODY);
+  await expect(noteLine(page)).toHaveCount(0); // nothing before the first add
+
+  await foodInput(page).fill(NAME);
+  await expect(kcalInput(page)).toHaveValue("");
+  await expect(proteinInput(page)).toHaveValue("");
+
+  const estReq = page.waitForRequest(estimatePost);
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await estReq).postDataJSON()).toEqual({ name: NAME });
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 98, proteinG: 2.6 });
+  expect((await dietRes).status()).toBe(201);
+  expect(seen).toEqual([{ name: NAME }]);
+
+  const row = rowFor(page, NAME);
+  await expect(page.locator("main ul > li")).toHaveCount(1);
+  await expect(row.getByText("98kcal · 3g", { exact: true })).toBeVisible(); // protein rounded for display
+  await totals(98, 3);
+
+  await expect(noteLine(page)).toHaveText(LABEL_NOTE); // exact, whole line
+  await expect(page.getByText(LABEL_NOTE, { exact: true })).toBeVisible();
+  await expect(noteLine(page)).toHaveCount(1);
+  await expect(page.getByText(COACH_NOTE)).toHaveCount(0);
+  await expect(noteLine(page)).not.toContainText("g/ml"); // no servingG in the answer: no portion clause
+  await expect(noteLine(page)).not.toContainText("(assumed)");
+
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(foodInput(page)).toHaveValue(""); // the note survives the form reset
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(page.getByText(HINT, { exact: true })).toBeVisible();
+});
+
+test("Estimate source estimate: the note says the coach guessed and names no product", async ({ page }) => {
+  const NAME = "E2E est coach note";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const seen = await mockEstimate(page, 200, COACH_BODY);
+
+  await foodInput(page).fill(NAME);
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 610, proteinG: 32 });
+  expect((await dietRes).status()).toBe(201);
+  expect(seen).toEqual([{ name: NAME }]);
+
+  await expect(page.locator("main ul > li")).toHaveCount(1);
+  await expect(rowFor(page, NAME).getByText("610kcal · 32g", { exact: true })).toBeVisible();
+  await totals(610, 32);
+
+  await expect(noteLine(page)).toHaveText(COACH_NOTE);
+  await expect(page.getByText(COACH_NOTE, { exact: true })).toBeVisible();
+  await expect(noteLine(page)).toHaveCount(1);
+  await expect(page.getByText("From the “")).toHaveCount(0); // matchedName null: no label wording at all
+  await expect(page.getByText("delete and re-add")).toHaveCount(0);
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("Estimate body without source/matchedName still adds the row and shows the coach note", async ({ page }) => {
+  const NAME = "E2E est legacy body";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const seen = await mockEstimate(page, 200, LEGACY_BODY);
+
+  await foodInput(page).fill(NAME);
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 415, proteinG: 18.5 });
+  expect((await dietRes).status()).toBe(201);
+  expect(seen).toEqual([{ name: NAME }]);
+
+  await expect(page.locator("main ul > li")).toHaveCount(1);
+  await expect(rowFor(page, NAME).getByText("415kcal · 19g", { exact: true })).toBeVisible();
+  await totals(415, 19);
+
+  await expect(noteLine(page)).toHaveText(COACH_NOTE); // falls back, never crashes on undefined
+  await expect(page.getByText("From the “")).toHaveCount(0);
+  await expect(page.getByText("undefined")).toHaveCount(0);
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(estimatingBtn(page)).toHaveCount(0);
+});
+
+test("The source note clears the moment the next add starts, before the new one lands", async ({ page }) => {
+  const FIRST = "E2E est note first";
+  const SECOND = "E2E est note second";
+  await openDiet(page, []);
+  await mockEstimate(page, 200, LABEL_BODY);
+
+  await foodInput(page).fill(FIRST);
+  const firstRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await firstRes).status()).toBe(201);
+  await expect(noteLine(page)).toHaveText(LABEL_NOTE);
+  await expect(rowFor(page, FIRST)).toHaveCount(1);
+
+  // Same endpoint, now held open, so the in-flight window can be asserted instead of raced.
+  await page.unroute("**/api/ai/estimate");
+  const release = await mockEstimateGated(page, COACH_BODY);
+
+  await foodInput(page).fill(SECOND);
+  await addBtn(page).click();
+
+  await expect(estimatingBtn(page)).toBeVisible();
+  await expect(noteLine(page)).toHaveCount(0); // the previous note is gone while this one is still unknown
+  await expect(page.getByText(LABEL_NOTE)).toHaveCount(0);
+  await expect(page.getByText(COACH_NOTE)).toHaveCount(0);
+  await expect(page.locator("main ul > li")).toHaveCount(1); // nothing added yet
+  await expect(estimatingBtn(page)).toBeDisabled(); // still held, nothing raced the note back on
+  await expect(noteLine(page)).toHaveCount(0);
+
+  release();
+
+  await expect(noteLine(page)).toHaveText(COACH_NOTE);
+  await expect(page.getByText(LABEL_NOTE)).toHaveCount(0); // replaced, not stacked
+  await expect(noteLine(page)).toHaveCount(1);
+  await expect(page.locator("main ul > li")).toHaveCount(2);
+  await expect(rowFor(page, SECOND).getByText("610kcal · 32g", { exact: true })).toBeVisible();
+  await expect(rowFor(page, FIRST).getByText("98kcal · 3g", { exact: true })).toBeVisible();
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("Both numbers typed: no estimate call fires and no source note appears", async ({ page }) => {
+  const NAME = "E2E est typed both";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const estimates = countRequests(page, estimatePost);
+  await mockEstimate(page, 200, LABEL_BODY); // armed, and must never fire
+
+  await foodInput(page).fill(NAME);
+  await kcalInput(page).fill("530");
+  await proteinInput(page).fill("41");
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 530, proteinG: 41 });
+  expect((await dietRes).status()).toBe(201);
+  await expect(page.locator("main ul > li")).toHaveCount(1);
+  await expect(rowFor(page, NAME).getByText("530kcal · 41g", { exact: true })).toBeVisible();
+  await totals(530, 41);
+
+  await expect(noteLine(page)).toHaveCount(0);
+  await expect(page.getByText(LABEL_NOTE)).toHaveCount(0);
+  await expect(page.getByText(COACH_NOTE)).toHaveCount(0);
+  await expect(estimatingBtn(page)).toHaveCount(0);
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(page.getByText(HINT, { exact: true })).toBeVisible();
+
+  await page.waitForTimeout(500); // let any stray request land before counting
+  expect(estimates.n).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// The portion clause, the sanitiser, and the save-rejected error.
+// ---------------------------------------------------------------------------
+
+// The portion the record itself published: printed as fact, with no qualifier.
+const SERVING_LABEL_BODY = {
+  kcal: 3, proteinG: 0, source: "label", matchedName: "Coca-Cola Zero", servingG: 330, servingSource: "label",
+};
+// The portion the coach guessed for a record that published none: printed as an assumption.
+const SERVING_GUESS_BODY = {
+  kcal: 98, proteinG: 2.6, source: "label", matchedName: "Actileaf Oat Drink", servingG: 200, servingSource: "estimate",
+};
+
+// Built from char codes so the fixture is unambiguous in source: U+202E RIGHT-TO-LEFT OVERRIDE,
+// U+0000, U+0007, U+2066 LEFT-TO-RIGHT ISOLATE, U+007F. OFF product names are world-writable.
+const ch = (code: number) => String.fromCharCode(code);
+const HOSTILE_NAME = ` ${ch(0x202e)}Acti${ch(0x0000)}leaf${ch(0x0007)} Oat${ch(0x2066)} Drink${ch(0x007f)} `;
+const HOSTILE_CLEAN = "Actileaf Oat Drink";
+const FORBIDDEN = new RegExp(
+  `[${ch(0x0000)}-${ch(0x001f)}${ch(0x007f)}${ch(0x202a)}-${ch(0x202e)}${ch(0x2066)}-${ch(0x2069)}]`,
+);
+
+// 77 characters, so the note must cut it at 60 and add an ellipsis.
+const LONG_NAME = "Actileaf Barista Style Organic Oat Drink Long Life UHT 1 Litre Carton 12 Pack";
+const LONG_CLEAN = "Actileaf Barista Style Organic Oat Drink Long Life UHT 1 Lit…";
+
+const SAVE_ERR = "Couldn't save that — check the numbers.";
+
+test("A serving off the record prints the portion as fact, with no (assumed)", async ({ page }) => {
+  const NAME = "E2E est serving label";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  await mockEstimate(page, 200, SERVING_LABEL_BODY);
+
+  await foodInput(page).fill(NAME);
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 3, proteinG: 0 });
+  expect((await dietRes).status()).toBe(201);
+
+  await expect(noteLine(page)).toHaveText(labelNote("Coca-Cola Zero", " for 330 g/ml"));
+  await expect(page.getByText(labelNote("Coca-Cola Zero", " for 330 g/ml"), { exact: true })).toBeVisible();
+  await expect(noteLine(page)).toHaveCount(1);
+  await expect(page.getByText("(assumed)")).toHaveCount(0); // the record said 330, nobody assumed it
+  await expect(page.getByText(COACH_NOTE)).toHaveCount(0);
+
+  await expect(rowFor(page, NAME).getByText("3kcal · 0g", { exact: true })).toBeVisible();
+  await totals(3, 0); // a 3 kcal can is a real label answer, not a failed one
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("A serving the coach guessed is marked (assumed) in the note", async ({ page }) => {
+  const NAME = "E2E est serving guessed";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  await mockEstimate(page, 200, SERVING_GUESS_BODY);
+
+  await foodInput(page).fill(NAME);
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 98, proteinG: 2.6 });
+  expect((await dietRes).status()).toBe(201);
+
+  const expected = labelNote("Actileaf Oat Drink", " for 200 (assumed) g/ml");
+  await expect(noteLine(page)).toHaveText(expected);
+  await expect(page.getByText(expected, { exact: true })).toBeVisible();
+  await expect(noteLine(page)).toHaveCount(1);
+  await expect(page.getByText(labelNote("Actileaf Oat Drink", " for 200 g/ml"))).toHaveCount(0);
+
+  await expect(rowFor(page, NAME).getByText("98kcal · 3g", { exact: true })).toBeVisible();
+  await totals(98, 3);
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("A label answer with no usable serving prints no portion clause at all", async ({ page }) => {
+  const NULL_NAME = "E2E est serving null";
+  const ZERO_NAME = "E2E est serving zero";
+  await openDiet(page, []);
+  await mockEstimate(page, 200, { ...LABEL_BODY, servingG: null, servingSource: null });
+
+  await foodInput(page).fill(NULL_NAME);
+  let dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await dietRes).status()).toBe(201);
+
+  await expect(page.locator("main ul > li")).toHaveCount(1);
+  await expect(noteLine(page)).toHaveText(LABEL_NOTE); // the bare label sentence, nothing appended
+  await expect(noteLine(page)).not.toContainText("g/ml");
+  await expect(noteLine(page)).not.toContainText("(assumed)");
+
+  // A 0 g portion is not a portion either, whatever the servingSource claims.
+  await page.unroute("**/api/ai/estimate");
+  await mockEstimate(page, 200, { ...LABEL_BODY, servingG: 0, servingSource: "label" });
+  await foodInput(page).fill(ZERO_NAME);
+  dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await dietRes).status()).toBe(201);
+
+  await expect(page.locator("main ul > li")).toHaveCount(2);
+  await expect(noteLine(page)).toHaveText(LABEL_NOTE);
+  await expect(noteLine(page)).not.toContainText("g/ml");
+  await expect(page.getByText("for 0")).toHaveCount(0);
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("A matched name carrying control and bidi characters is sanitised before it is shown", async ({ page }) => {
+  const NAME = "E2E est hostile label";
+  // The fixture really is hostile, and survives serialisation: this test cannot pass vacuously.
+  expect(HOSTILE_NAME).toMatch(FORBIDDEN);
+  expect(JSON.stringify({ matchedName: HOSTILE_NAME })).toContain("\\u0000");
+  expect(HOSTILE_NAME).not.toBe(HOSTILE_CLEAN);
+  await openDiet(page, []);
+  await mockEstimate(page, 200, { ...LABEL_BODY, matchedName: HOSTILE_NAME, servingG: 250, servingSource: "estimate" });
+
+  await foodInput(page).fill(NAME);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await dietRes).status()).toBe(201);
+
+  const expected = labelNote(HOSTILE_CLEAN, " for 250 (assumed) g/ml");
+  await expect(noteLine(page)).toHaveText(expected);
+  await expect(noteLine(page)).toHaveCount(1);
+
+  // The rendered characters themselves, not just a normalised match: nothing hostile survived.
+  const rendered = await noteLine(page).evaluate((el) => el.textContent ?? "");
+  expect(rendered).toBe(expected);
+  expect(rendered).not.toMatch(FORBIDDEN);
+  expect(await page.locator("body").evaluate((el) => el.textContent ?? "")).not.toMatch(FORBIDDEN);
+  await expect(rowFor(page, NAME).getByText("98kcal · 3g", { exact: true })).toBeVisible();
+});
+
+test("A matched name longer than 60 characters is truncated with an ellipsis", async ({ page }) => {
+  const NAME = "E2E est long label";
+  expect(LONG_NAME.length).toBe(77);
+  expect(LONG_CLEAN.length).toBe(61); // 60 characters plus the ellipsis
+  await openDiet(page, []);
+  await mockEstimate(page, 200, { ...SERVING_LABEL_BODY, matchedName: LONG_NAME });
+
+  await foodInput(page).fill(NAME);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await dietRes).status()).toBe(201);
+
+  const expected = labelNote(LONG_CLEAN, " for 330 g/ml");
+  await expect(noteLine(page)).toHaveText(expected);
+  const rendered = await noteLine(page).evaluate((el) => el.textContent ?? "");
+  expect(rendered).toBe(expected);
+  expect(rendered).not.toContain("Carton 12 Pack"); // the tail is gone, not wrapped
+  expect(rendered).not.toContain(LONG_NAME);
+  await expect(page.getByText(LONG_NAME)).toHaveCount(0);
+});
+
+test("A rejected diet POST shows the save error and leaves the form filled", async ({ page }) => {
+  const NAME = "E2E est save rejected";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const estimates = countRequests(page, estimatePost);
+  await mockEstimate(page, 200, LABEL_BODY); // armed, and must never fire: both numbers are typed
+
+  // Only the POST is rejected; the page's own GET /api/diet must still load normally.
+  const dietPath = (url: URL) => url.pathname === "/api/diet";
+  const reject = async (route: Route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "bad request" }) });
+  };
+  await page.route(dietPath, reject);
+
+  await foodInput(page).fill(NAME);
+  await kcalInput(page).fill("6000"); // past the API's 5000 ceiling: the real 400 this guards
+  await proteinInput(page).fill("41");
+  const rejected = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await rejected).status()).toBe(400);
+
+  await expect(formErrLine(page)).toHaveText(SAVE_ERR);
+  await expect(page.getByText(SAVE_ERR, { exact: true })).toBeVisible();
+  await expect(page.locator("main ul > li")).toHaveCount(0); // nothing was saved
+  await totals(0, 0);
+  await expect(noteLine(page)).toHaveCount(0);
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(estimatingBtn(page)).toHaveCount(0);
+
+  // Every box keeps exactly what was typed, so the bad number can be corrected in place.
+  await expect(foodInput(page)).toHaveValue(NAME);
+  await expect(kcalInput(page)).toHaveValue("6000");
+  await expect(proteinInput(page)).toHaveValue("41");
+
+  // Correcting it and re-adding clears the error and saves for real.
+  await page.unroute(dietPath, reject);
+  await kcalInput(page).fill("530");
+  const saved = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await saved).status()).toBe(201);
+
+  await expect(rowFor(page, NAME).getByText("530kcal · 41g", { exact: true })).toBeVisible();
+  await totals(530, 41);
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(page.getByText(SAVE_ERR)).toHaveCount(0);
+  await expect(foodInput(page)).toHaveValue(""); // reset only once the row really landed
+
+  await page.waitForTimeout(500); // let any stray request land before counting
+  expect(estimates.n).toBe(0);
+});
+
+test("A rejected save keeps the label note beside the error", async ({ page }) => {
+  const NAME = "E2E est save rejected note";
+  await openDiet(page, []);
+  await mockEstimate(page, 200, SERVING_GUESS_BODY);
+
+  const dietPath = (url: URL) => url.pathname === "/api/diet";
+  await page.route(dietPath, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "bad request" }) });
+  });
+
+  await foodInput(page).fill(NAME); // both numbers blank: the estimate fills them, then the save fails
+  const rejected = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await rejected).status()).toBe(400);
+
+  await expect(formErrLine(page)).toHaveText(SAVE_ERR);
+  await expect(noteLine(page)).toHaveText(labelNote("Actileaf Oat Drink", " for 200 (assumed) g/ml"));
+  await expect(page.locator("main ul > li")).toHaveCount(0);
+  await expect(foodInput(page)).toHaveValue(NAME);
+  await expect(addBtn(page)).toBeEnabled();
 });
 
 test("AI_LIVE: a UI-created meal analyzes for real and renders the full panel", async ({ page }) => {

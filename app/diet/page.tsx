@@ -24,6 +24,29 @@ const PANEL_ROWS: [string, (p: Panel) => number, string][] = [
   ["Zinc", (p) => p.micros.zinc_mg, "mg"],
 ];
 
+type EstimateResponse = {
+  kcal: number; proteinG: number;
+  source?: "label" | "estimate";
+  matchedName?: string | null;
+  servingG?: number | null;
+  servingSource?: "label" | "estimate" | null;
+};
+
+// Product names come from a public, world-writable database: strip control and
+// direction-override characters and cap the length before showing them as app copy.
+function safeName(name: string): string {
+  const clean = name.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, "").trim();
+  return clean.length > 60 ? `${clean.slice(0, 60)}…` : clean;
+}
+
+function noteFor(est: EstimateResponse): string {
+  if (est.source !== "label" || !est.matchedName) return "Estimated by the coach — no matching product label found.";
+  const portion = est.servingG
+    ? ` for ${est.servingG}${est.servingSource === "label" ? "" : " (assumed)"} g/ml`
+    : "";
+  return `From the “${safeName(est.matchedName)}” label${portion} — delete and re-add with your own numbers if that is the wrong product.`;
+}
+
 export default function Diet() {
   const date = todayIso();
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -35,6 +58,7 @@ export default function Diet() {
   const [rowErr, setRowErr] = useState<Record<number, string>>({});
   const [estimating, setEstimating] = useState(false);
   const [formErr, setFormErr] = useState("");
+  const [formNote, setFormNote] = useState("");
 
   // Generation guard: overlapping loads can resolve out of order and an older
   // response would otherwise wipe a freshly analyzed panel out of client state.
@@ -63,7 +87,7 @@ export default function Diet() {
     if (!name) return;
     let kcal = Number(form.kcal);
     let proteinG = Number(form.proteinG);
-    setFormErr("");
+    setFormErr(""); setFormNote("");
     if (!form.kcal.trim() || !form.proteinG.trim()) {
       setEstimating(true);
       try {
@@ -71,13 +95,19 @@ export default function Diet() {
         if (res.status === 401) { window.location.href = "/login"; return; }
         if (res.status === 503) { setFormErr("Estimating needs OPENAI_API_KEY — type the numbers instead."); return; }
         if (!res.ok) { setFormErr("Couldn't estimate that — type the numbers instead."); return; }
-        const est = (await res.json()) as { kcal: number; proteinG: number };
+        const est = (await res.json()) as EstimateResponse;
         if (!form.kcal.trim()) kcal = est.kcal;
         if (!form.proteinG.trim()) proteinG = est.proteinG;
+        setFormNote(noteFor(est));
       } catch { setFormErr("Network error."); return; }
       finally { setEstimating(false); }
     }
-    await add(name, kcal, proteinG);
+    try {
+      await add(name, kcal, proteinG);
+    } catch {
+      setFormErr("Couldn't save that — check the numbers.");
+      return;
+    }
     setForm({ name: "", kcal: "", proteinG: "" });
   }
   async function savePreset() {
@@ -125,6 +155,7 @@ export default function Diet() {
       </form>
       <p className="-mt-2 text-xs text-neutral-500">Leave kcal or protein blank and the coach estimates them from the name.</p>
       {formErr && <p className="-mt-2 text-sm text-red-400">{formErr}</p>}
+      {formNote && <p className="-mt-2 text-xs text-neutral-400">{formNote}</p>}
 
       {presets.length > 0 && (
         <div className="flex flex-wrap gap-2">

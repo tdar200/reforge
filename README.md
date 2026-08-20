@@ -18,9 +18,11 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
   panel (macros plus 11 vitamins/minerals), anchored to your logged kcal/protein, and gives a verdict with
   one concrete swap suggestion grounded in your remaining day budget. Analyzed once, stored on the entry
   (`nutrition` jsonb), served from the DB ever after. Clearly labeled as estimates, not label values.
-- **Macros you don't know** — log a meal by name and leave kcal or protein blank; the coach estimates the
-  missing one for a typical UK serving before the row is written. A meal already logged without macros is
-  treated as unknown rather than zero: analyzing it fills the numbers in and corrects the day's totals.
+- **Macros you don't know** — log a meal by name and leave kcal or protein blank. Reforge looks the product
+  up in Open Food Facts and uses the real label when it can identify it confidently, otherwise the coach
+  estimates a typical UK serving. The row always says which it used, and for which portion. A meal already
+  logged without macros is treated as unknown rather than zero: analyzing it fills the numbers in and
+  corrects the day's totals.
 - **Weekly review (AI)** — the server compresses the last 14 days (top set per exercise per session,
   daily kcal/protein vs target, cardio, weight/waist, adherence) into ~3k tokens of JSON; the model writes a
   sub-250-word review with three concrete next-week targets. Reviews are stored and shown on Today.
@@ -34,7 +36,7 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 | AI | Vercel AI SDK (`ai` v7) + `@ai-sdk/openai`, **GPT-5 mini** | see below |
 | DB | Neon Postgres + Drizzle ORM (`neon-http`) | serverless-friendly; migrations in repo |
 | Auth | passcode → HS256 JWT cookie (`jose`) | single-user app; enough to gate the API |
-| Tests | vitest + Playwright: 71 unit, 210 API integration, 52 e2e | see Testing below |
+| Tests | vitest + Playwright: 338 unit, 217 API integration, 64 e2e | see Testing below |
 
 ## How AI is used (and why GPT-5 mini)
 
@@ -48,9 +50,15 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
   block) filled from one meal plus the day's remaining budget. Your logged kcal/protein are pinned over whatever
   the model returns and the result is re-validated, so a panel can never contradict the row it belongs to.
   Panels are stored per entry and served from the DB afterwards — one model call per meal, ever.
-- **Macro estimate** (`lib/ai/estimate.ts`): a two-field call behind the manual add form, so a blank number
-  means "work it out" instead of silently logging zero. A meal recorded as 0 kcal *and* 0 protein carries no
-  information, so analysis estimates it and writes the result back to the row rather than pinning zeros.
+- **Macro estimate** (`lib/ai/estimate.ts`): a blank number means "work it out" instead of silently logging
+  zero. A meal recorded as 0 kcal *and* 0 protein carries no information, so analysis estimates it and writes
+  the result back to the row rather than pinning zeros.
+- **Label lookup** (`lib/food/openfoodfacts.ts`): before asking the model, search Open Food Facts. Matching is
+  deliberately strict — the product must account for every word logged and may only add nutritionally neutral
+  ones, so `Coca Cola Zero` never matches *Zero Cherry* and `white loaf` never matches the *gluten free* one.
+  Wrong label data is worse than an honest estimate, so anything short of confident falls back to the model.
+  The label supplies density (per 100 g) and the portion comes from the product record or the model, and the
+  response says which — the portion is the dominant error term, so the UI shows it.
 - **Why GPT-5 mini:** the parse call is interactive, so latency and cost matter more than raw capability;
   the mini tier handles a ~15-field structured schema reliably, and a frontier model would not change the
   quality of a 250-word review. Cost is negligible at this traffic (~2–3k input tokens per parse).
@@ -76,13 +84,13 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 
 ## Testing
 
-- `npm test` — 71 unit tests, no network or keys (the AI boundary is covered with the AI SDK mock model:
+- `npm test` — 338 unit tests, no network or keys (the AI boundary is covered with the AI SDK mock model:
   sanitizer branches, schema rejection, prompt and config assertions).
-- `npm run test:int` — 210 HTTP integration tests against a dev server (`PORT=3100 npm run dev`):
+- `npm run test:int` — 217 HTTP integration tests against a dev server (`PORT=3100 npm run dev`):
   every route × method × auth state (a 401 matrix over all endpoints), every Zod validation contract,
   cookie flags and JWT tampering/expiry, atomicity of the AI commit batch, and the documented
   same-date write race. Suites write only to far-future dates and clean up after themselves.
-- `npm run test:e2e` — 52 Playwright tests over all six screens: login, Today (QuickLog proposals via a
+- `npm run test:e2e` — 64 Playwright tests over all six screens: login, Today (QuickLog proposals via a
   mocked parse, error states that preserve the user's text, CoachReview markdown rendering), workout,
   diet, body, settings, plus the PWA manifest. Live-model happy paths are gated behind `AI_LIVE=1` and
   skip cleanly without it.
@@ -108,7 +116,8 @@ lib/ai/parse-log.ts   prompt builder, sanitizer, parse call
 lib/ai/commit.ts      pure planner: confirmed proposals → row writes
 lib/ai/review.ts      pure context builder, review prompt, review call
 lib/ai/nutrition.ts   meal panel schema, prompt, pinned-and-revalidated analysis
-lib/ai/estimate.ts    kcal/protein estimate for a meal logged by name alone
+lib/ai/estimate.ts    label-or-estimate macros for a meal logged by name alone
+lib/food/openfoodfacts.ts  Open Food Facts search, strict matching, per-serving scaling
 lib/ai/data.ts        the only AI file that reads the DB
 lib/db/demo-data.ts   seeded PRNG demo generator (+ seed-demo.ts writer)
 components/QuickLog.tsx, components/CoachReview.tsx, app/diet/page.tsx (meal panel UI)
@@ -124,10 +133,14 @@ components/QuickLog.tsx, components/CoachReview.tsx, app/diet/page.tsx (meal pan
 - **Review history.** Every review is stored but only the latest is shown; a list + diff between weeks is cheap to add.
 - **Confidence / ambiguity UI.** The schema could carry a per-item confidence and the cards could highlight
   low-confidence ones. Skipped to keep the parse contract small.
-- **Micronutrients are model estimates, not label data.** Good enough to spot "this day had almost no vitamin C",
-  not good enough to trust to the milligram, and the UI says so. The upgrade is a real food database
-  (Open Food Facts covers UK supermarket barcodes for free): look the product up first, fall back to the model
-  only for home-cooked meals, and mark each row with its source.
+- **Micronutrients are still model estimates.** The Open Food Facts lookup corrects calories and protein, but
+  UK labels rarely carry vitamins, so the panel's micros remain estimates — good enough to spot "almost no
+  vitamin C today", not good enough to trust to the milligram, and the UI says so.
+- **Label matching is conservative by design, so it fires less often than it could.** Name search is fuzzy and
+  a wrong label silently corrupts the log, so I reject anything ambiguous. Barcode scanning is the real fix:
+  it identifies the exact product, and Open Food Facts is built around it.
+- **The looked-up label carries carbs, fat, sugar and salt that I currently discard**, then the panel asks the
+  model to re-invent them. Plumbing those through would make four more numbers label-true for matched foods.
 - **Evaluation.** I'd add a small golden set of log lines → expected proposals and run it against the model in CI
   (AI SDK's mock provider for the route tests, real model nightly).
 - **Voice input** via the Web Speech API is a natural fit for the gym floor.
