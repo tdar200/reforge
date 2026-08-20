@@ -26,7 +26,7 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 | AI | Vercel AI SDK (`ai` v7) + `@ai-sdk/openai`, **GPT-5 mini** | see below |
 | DB | Neon Postgres + Drizzle ORM (`neon-http`) | serverless-friendly; migrations in repo |
 | Auth | passcode → HS256 JWT cookie (`jose`) | single-user app; enough to gate the API |
-| Tests | vitest, 41 unit tests, no network | every AI boundary is a Zod contract so the logic is testable without a key |
+| Tests | vitest + Playwright: 47 unit, 149 API integration, 30 e2e | see Testing below |
 
 ## How AI is used (and why GPT-5 mini)
 
@@ -54,7 +54,22 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 3. `npm run db:migrate` then either `npm run db:seed` (empty program) or `npm run db:seed:demo` (3 weeks of
    deterministic synthetic history so the coach has something to review).
 4. `npm run dev` → http://localhost:3000 → enter the passcode.
-5. `npm test` · `npx tsc --noEmit`
+5. `npm test` · `npx tsc --noEmit` (full suite: see Testing)
+
+## Testing
+
+- `npm test` — 47 unit tests, no network or keys (the AI boundary is covered with the AI SDK mock model:
+  sanitizer branches, schema rejection, prompt and config assertions).
+- `npm run test:int` — 149 HTTP integration tests against a dev server (`PORT=3100 npm run dev`):
+  every route × method × auth state (a 401 matrix over all endpoints), every Zod validation contract,
+  cookie flags and JWT tampering/expiry, atomicity of the AI commit batch, and the documented
+  same-date write race. Suites write only to far-future dates and clean up after themselves.
+- `npm run test:e2e` — 30 Playwright tests over all six screens: login, Today (QuickLog proposals via a
+  mocked parse, error states that preserve the user's text, CoachReview markdown rendering), workout,
+  diet, body, settings, plus the PWA manifest. Live-model happy paths are gated behind `AI_LIVE=1` and
+  skip cleanly without it.
+- Writing these suites surfaced 5 real bugs (malformed ids/dates and FK violations returning 500
+  instead of 400) — each is pinned by a test and fixed.
 
 ## Deploy (Vercel)
 
