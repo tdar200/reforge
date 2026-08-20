@@ -1,3 +1,4 @@
+import { neonConfig } from "@neondatabase/serverless";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -52,6 +53,17 @@ async function getJson<T>(page: Page, apiPath: string): Promise<T> {
   expect(res.status()).toBe(200);
   return (await res.json()) as T;
 }
+
+
+// Retry connection-phase Neon failures (request never sent) — same hardening as tests-int/setup.ts.
+neonConfig.fetchFunction = async (url: string, init: RequestInit) => {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return await fetch(url, init); }
+    catch (err) { lastErr = err; await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); }
+  }
+  throw lastErr;
+};
 
 function loadDatabaseUrl() {
   if (process.env.DATABASE_URL) return;

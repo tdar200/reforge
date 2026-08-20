@@ -10,19 +10,21 @@ const EXAMPLE = "bench 3x8 at 60, lateral raises 3x15 at 8, 20 min bike, oats + 
 
 export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void }) {
   const [text, setText] = useState("");
+  const [logDate, setLogDate] = useState(date);
   const [items, setItems] = useState<Proposal[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
   const [exs, setExs] = useState<Ex[]>([]);
   const [configured, setConfigured] = useState(true);
 
   useEffect(() => { api<Ex[]>("/api/exercises").then(setExs).catch(() => {}); }, []);
 
   async function parse() {
-    setStatus("parsing"); setError(null);
+    setStatus("parsing"); setError(null); setSaved(null);
     try {
-      const res = await fetch("/api/ai/parse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, date }) });
+      const res = await fetch("/api/ai/parse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, date: logDate }) });
       if (res.status === 503) { setConfigured(false); return; }
       if (res.status === 401) { window.location.href = "/login"; return; }
       if (!res.ok) { setError("Couldn't parse that — try a shorter line."); return; }
@@ -36,13 +38,14 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
   async function save() {
     if (!items?.length) return;
     if (items.some((i) => i.kind === "set" && i.exerciseId === null)) { setError("Pick an exercise for every set before saving."); return; }
-    setStatus("saving"); setError(null);
+    setStatus("saving"); setError(null); setSaved(null);
     try {
-      const res = await fetch("/api/ai/commit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, items }) });
+      const res = await fetch("/api/ai/commit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: logDate, items }) });
       if (res.status === 401) { window.location.href = "/login"; return; }
       if (res.status === 400) { setError("Some values are invalid — check the numbers."); return; }
       if (!res.ok) { setError("Save failed — nothing was written."); return; }
       setItems(null); setNote(null); setText("");
+      setSaved(`Saved to ${logDate}`);
       onSaved();
     } catch { setError("Save failed — nothing was written."); }
     finally { setStatus("idle"); }
@@ -64,7 +67,11 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
     <section className="rounded bg-neutral-900 p-4 space-y-3">
       <div className="flex items-baseline justify-between">
         <h2 className="font-semibold">Quick log</h2>
-        <span className="text-xs text-neutral-500">AI · GPT-5 mini</span>
+        <div className="flex items-center gap-2">
+          <input type="date" aria-label="Log date" className="rounded bg-neutral-800 px-1 py-0.5 text-xs text-neutral-300"
+            value={logDate} max={date} onChange={(e) => { if (e.target.value) setLogDate(e.target.value); setSaved(null); }} />
+          <span className="text-xs text-neutral-500">AI · GPT-5 mini</span>
+        </div>
       </div>
       <textarea className="w-full rounded bg-neutral-800 p-2 text-sm" rows={2} placeholder={EXAMPLE}
         value={text} onChange={(e) => setText(e.target.value)} maxLength={1000} />
@@ -77,6 +84,7 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
         </button>}
       </div>
       {error && <p className="text-sm text-red-400">{error}</p>}
+      {saved && <p className="text-sm text-green-400">{saved}</p>}
       {note && <p className="text-xs text-amber-400">Not mapped: {note}</p>}
       {items && (
         <ul className="space-y-2">

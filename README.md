@@ -12,7 +12,8 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 - **Quick log (AI)** — type one line: `bench 3x8 at 60, 20 min bike, oats + whey, weight 79.6`.
   The model maps it onto the exercise catalogue and food presets and returns typed proposals
   (sets / cardio / meals / metrics). You edit the cards, tap Save, and everything is written atomically.
-  Nothing is written until you confirm.
+  Nothing is written until you confirm. A date control on the composer backdates the whole line
+  (yesterday's forgotten session, for example) — it defaults to today and is capped at today.
 - **Weekly review (AI)** — the server compresses the last 14 days (top set per exercise per session,
   daily kcal/protein vs target, cardio, weight/waist, adherence) into ~3k tokens of JSON; the model writes a
   sub-250-word review with three concrete next-week targets. Reviews are stored and shown on Today.

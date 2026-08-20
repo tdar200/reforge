@@ -1,3 +1,4 @@
+import { neonConfig } from "@neondatabase/serverless";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -72,6 +73,17 @@ const quickLog = (page: Page) => page.locator("section").filter({ has: page.getB
 const coach = (page: Page) => page.locator("section").filter({ has: page.getByRole("heading", { name: "Coach review", exact: true }) });
 
 const pin = (page: Page, iso: string) => page.clock.setFixedTime(new Date(`${iso}T12:00:00`));
+
+
+// Retry connection-phase Neon failures (request never sent) — same hardening as tests-int/setup.ts.
+neonConfig.fetchFunction = async (url: string, init: RequestInit) => {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return await fetch(url, init); }
+    catch (err) { lastErr = err; await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); }
+  }
+  throw lastErr;
+};
 
 function loadDatabaseUrl() {
   if (process.env.DATABASE_URL) return;
@@ -203,6 +215,44 @@ test("QuickLog: mocked parse renders proposal cards per kind; edit, remove, guar
   const metrics = ((await (await page.request.get("/api/metrics")).json()) as MetricRow[]).filter((m) => m.date === QL_DATE);
   expect(metrics).toHaveLength(1);
   expect(metrics[0].bodyweight).toBe(80.5);
+});
+
+test("QuickLog: date control backdates parse and commit to the chosen day", async ({ page }) => {
+  await pin(page, "2030-05-23");
+  await page.route("**/api/ai/parse", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      items: [{ kind: "meal", name: "backdated oats", kcal: 300, proteinG: 20, presetId: null, estimated: true }],
+      note: null,
+    }) }));
+  await loginQuickLogReady(page);
+  const panel = quickLog(page);
+
+  const dateInput = panel.getByLabel("Log date");
+  await expect(dateInput).toHaveValue("2030-05-23"); // defaults to today
+  // max is capped at today; SSR renders it with the server clock and hydration
+  // doesn't patch attributes, so under the mocked clock only the format is stable.
+  await expect(dateInput).toHaveAttribute("max", /^\d{4}-\d{2}-\d{2}$/);
+  await dateInput.fill("2030-05-22");
+
+  await panel.getByPlaceholder(SAMPLE).fill("oats for yesterday");
+  const parseReq = page.waitForRequest((r) => r.url().endsWith("/api/ai/parse") && r.method() === "POST");
+  await panel.getByRole("button", { name: "Parse", exact: true }).click();
+  expect((await parseReq).postDataJSON()).toEqual({ text: "oats for yesterday", date: "2030-05-22" });
+
+  const commitReq = page.waitForRequest((r) => r.url().endsWith("/api/ai/commit") && r.method() === "POST");
+  const commitRes = page.waitForResponse((r) => r.url().endsWith("/api/ai/commit") && r.request().method() === "POST");
+  await panel.getByRole("button", { name: "Save 1", exact: true }).click();
+  expect((await commitReq).postDataJSON()).toEqual({
+    date: "2030-05-22",
+    items: [{ kind: "meal", name: "backdated oats", kcal: 300, proteinG: 20, presetId: null, estimated: true }],
+  });
+  expect((await commitRes).status()).toBe(201);
+
+  await expect(panel.getByText("Saved to 2030-05-22", { exact: true })).toBeVisible();
+
+  const diet = (await (await page.request.get("/api/diet?date=2030-05-22")).json()) as DietRow[];
+  expect(diet).toHaveLength(1);
+  expect(diet[0]).toMatchObject({ name: "backdated oats", kcal: 300, proteinG: 20 });
 });
 
 test("QuickLog: parse with zero items shows the empty-items message and no Save button", async ({ page }) => {
