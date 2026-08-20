@@ -90,9 +90,10 @@ test("QuickLog: empty or whitespace input keeps Parse disabled and fires no requ
   expect(writes).toEqual([]);
 });
 
-test("QuickLog: parse failure without AI_LIVE shows the error, preserves the text, writes nothing", async ({ page }) => {
-  test.skip(AI_LIVE, "only valid while the model call fails");
+test("QuickLog: parse 502 shows the error, preserves the text, writes nothing", async ({ page }) => {
   await login(page);
+  await page.route("**/api/ai/parse", (route) =>
+    route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "parse_failed" }) }));
   const writes = collectApiWrites(page, ["/api/ai/parse"]);
   const panel = quickLog(page);
   await panel.getByPlaceholder(SAMPLE).fill(SAMPLE);
@@ -153,9 +154,12 @@ test("CoachReview: initial panel reflects the stored review", async ({ page }) =
   }
 });
 
-test("CoachReview: generate without AI_LIVE surfaces the error, keeps prior state, stores nothing", async ({ page }) => {
-  test.skip(AI_LIVE, "only valid while the model call fails");
+test("CoachReview: generate 502 surfaces the error, keeps prior state, stores nothing", async ({ page }) => {
   await login(page);
+  await page.route("**/api/ai/review", (route) =>
+    route.request().method() === "POST"
+      ? route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "review_failed" }) })
+      : route.continue());
   const before = await getReview(page);
   const panel = coach(page);
   const label = before ? "Review again" : "Review my week";

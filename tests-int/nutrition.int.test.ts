@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, gte, inArray, lte } from "drizzle-orm";
+import { and, gte, inArray, like, lte } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { dietEntries, foodPresets } from "@/lib/db/schema";
 import { api, loginCookie } from "./helpers";
@@ -24,6 +24,8 @@ type PresetRow = Omit<DietRow, "date">;
 
 beforeAll(async () => {
   cookie = await loginCookie();
+  // Self-heal: a crashed earlier run can leak our presets past the id-tracked cleanup.
+  await db.delete(foodPresets).where(like(foodPresets.name, "INT-TEST%"));
   const res = await api("/api/settings", { cookie });
   expect(res.status).toBe(200);
   const s = res.json as { id: number; calorieTarget: number; proteinTarget: number };

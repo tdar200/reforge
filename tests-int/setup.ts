@@ -15,3 +15,20 @@ for (const line of raw.split("\n")) {
   if (process.env[key] === undefined) process.env[key] = val;
 }
 process.env.REFORGE_URL ||= "http://localhost:3100";
+
+// Direct drizzle calls in setup/cleanup go straight to Neon; flaky links drop the
+// connect phase ("fetch failed") and take a whole file's beforeAll with them.
+// Retry only connection-phase failures — the request never reached the server.
+import { neonConfig } from "@neondatabase/serverless";
+neonConfig.fetchFunction = async (url: string, init: RequestInit) => {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+};

@@ -262,12 +262,6 @@ describe("POST /api/ai/parse", () => {
     }
   });
 
-  test.runIf(!AI_LIVE)("without AI_LIVE the live model call fails: 502 parse_failed", async () => {
-    const res = await api("/api/ai/parse", { method: "POST", body: { text: "bench 3x8 at 60, weight 79.6", date: D_PARSE }, cookie });
-    expect(res.status).toBe(502);
-    expect(res.json).toEqual({ error: "parse_failed" });
-  }, 60_000);
-
   test.runIf(AI_LIVE)("live: returns typed proposals for 'bench 3x8 at 60, weight 79.6'", async () => {
     const res = await api("/api/ai/parse", { method: "POST", body: { text: "bench 3x8 at 60, weight 79.6", date: D_PARSE }, cookie });
     expect(res.status).toBe(200);
@@ -289,12 +283,6 @@ describe("/api/ai/review", () => {
     expect(post.status).toBe(401);
     expect(post.json).toEqual({ error: "unauthorized" });
   });
-
-  test.runIf(!AI_LIVE)("without AI_LIVE the live model call fails: 502 review_failed", async () => {
-    const res = await api("/api/ai/review", { method: "POST", cookie });
-    expect(res.status).toBe(502);
-    expect(res.json).toEqual({ error: "review_failed" });
-  }, 60_000);
 
   test.runIf(AI_LIVE)("live: POST stores a review and GET returns it", async () => {
     const post = await api("/api/ai/review", { method: "POST", cookie });
