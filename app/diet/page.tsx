@@ -1,12 +1,28 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/client";
 import { todayIso } from "@/lib/today";
 import { sumDiet } from "@/lib/logic";
+import type { NutritionPanel } from "@/lib/ai/nutrition";
 
-type Entry = { id: number; name: string; kcal: number; proteinG: number };
+type Panel = NutritionPanel;
+type Entry = { id: number; name: string; kcal: number; proteinG: number; nutrition: Panel | null };
 type Preset = { id: number; name: string; kcal: number; proteinG: number };
 type Settings = { calorieTarget: number; proteinTarget: number };
+
+const VERDICT_STYLE = { good: "bg-green-600/20 text-green-400", ok: "bg-amber-600/20 text-amber-400", poor: "bg-red-600/20 text-red-400" } as const;
+
+const PANEL_ROWS: [string, (p: Panel) => number, string][] = [
+  ["Carbs", (p) => p.macros.carbsG, "g"], ["Fat", (p) => p.macros.fatG, "g"],
+  ["Sat fat", (p) => p.macros.saturatedFatG, "g"], ["Fibre", (p) => p.macros.fiberG, "g"],
+  ["Sugar", (p) => p.macros.sugarG, "g"], ["Salt", (p) => p.macros.saltG, "g"],
+  ["Vit A", (p) => p.micros.vitaminA_ug, "µg"], ["Vit C", (p) => p.micros.vitaminC_mg, "mg"],
+  ["Vit D", (p) => p.micros.vitaminD_ug, "µg"], ["Vit E", (p) => p.micros.vitaminE_mg, "mg"],
+  ["B12", (p) => p.micros.vitaminB12_ug, "µg"], ["Folate", (p) => p.micros.folate_ug, "µg"],
+  ["Calcium", (p) => p.micros.calcium_mg, "mg"], ["Iron", (p) => p.micros.iron_mg, "mg"],
+  ["Potassium", (p) => p.micros.potassium_mg, "mg"], ["Magnesium", (p) => p.micros.magnesium_mg, "mg"],
+  ["Zinc", (p) => p.micros.zinc_mg, "mg"],
+];
 
 export default function Diet() {
   const date = todayIso();
@@ -14,11 +30,22 @@ export default function Diet() {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [settings, setSettings] = useState<Settings>({ calorieTarget: 2000, proteinTarget: 170 });
   const [form, setForm] = useState({ name: "", kcal: "", proteinG: "" });
+  const [open, setOpen] = useState<Record<number, boolean>>({});
+  const [busy, setBusy] = useState<number | null>(null);
+  const [rowErr, setRowErr] = useState<Record<number, string>>({});
 
+  // Generation guard: overlapping loads can resolve out of order and an older
+  // response would otherwise wipe a freshly analyzed panel out of client state.
+  const loadSeq = useRef(0);
   async function load() {
-    setEntries(await api<Entry[]>(`/api/diet?date=${date}`));
-    setPresets(await api<Preset[]>(`/api/presets`));
-    setSettings(await api<Settings>(`/api/settings`));
+    const seq = ++loadSeq.current;
+    const [e, p, st] = await Promise.all([
+      api<Entry[]>(`/api/diet?date=${date}`),
+      api<Preset[]>(`/api/presets`),
+      api<Settings>(`/api/settings`),
+    ]);
+    if (seq !== loadSeq.current) return;
+    setEntries(e); setPresets(p); setSettings(st);
   }
   useEffect(() => { load(); }, []);
 
@@ -38,7 +65,28 @@ export default function Diet() {
     await api(`/api/presets`, { method: "POST", body: JSON.stringify({ name: form.name, kcal: Number(form.kcal), proteinG: Number(form.proteinG) }) });
     load();
   }
-  async function del(id: number) { await api(`/api/diet/${id}`, { method: "DELETE" }); load(); }
+  async function del(id: number) {
+    await api(`/api/diet/${id}`, { method: "DELETE" });
+    setOpen(({ [id]: _o, ...rest }) => rest);
+    setRowErr(({ [id]: _e, ...rest }) => rest);
+    load();
+  }
+
+  async function analyze(en: Entry) {
+    setRowErr((r) => ({ ...r, [en.id]: "" }));
+    if (en.nutrition) { setOpen((o) => ({ ...o, [en.id]: !o[en.id] })); return; }
+    setBusy(en.id);
+    try {
+      const res = await fetch("/api/ai/nutrition", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entryId: en.id }) });
+      if (res.status === 401) { window.location.href = "/login"; return; }
+      if (res.status === 503) { setRowErr((r) => ({ ...r, [en.id]: "Needs OPENAI_API_KEY on the server." })); return; }
+      if (!res.ok) { setRowErr((r) => ({ ...r, [en.id]: "Analysis failed — try again." })); return; }
+      const { nutrition } = (await res.json()) as { nutrition: Panel };
+      setEntries((cur) => cur.map((e) => (e.id === en.id ? { ...e, nutrition } : e)));
+      setOpen((o) => ({ ...o, [en.id]: true }));
+    } catch { setRowErr((r) => ({ ...r, [en.id]: "Network error." })); }
+    finally { setBusy(null); }
+  }
 
   return (
     <main className="p-4 space-y-4">
@@ -68,10 +116,31 @@ export default function Diet() {
 
       <ul className="space-y-2">
         {entries.map((en) => (
-          <li key={en.id} className="flex justify-between rounded bg-neutral-900 p-3">
-            <span>{en.name}</span>
-            <span className="text-neutral-400">{en.kcal}kcal · {Math.round(en.proteinG)}g</span>
-            <button onClick={() => del(en.id)} className="text-red-400">✕</button>
+          <li key={en.id} className="rounded bg-neutral-900 p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex-1">{en.name}</span>
+              <span className="text-neutral-400">{en.kcal}kcal · {Math.round(en.proteinG)}g</span>
+              <button onClick={() => analyze(en)} disabled={busy !== null} className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300 disabled:opacity-50">
+                {busy === en.id ? "Analyzing…" : en.nutrition ? "Info" : "Analyze"}
+              </button>
+              <button onClick={() => del(en.id)} disabled={busy === en.id} className="text-red-400 disabled:opacity-50">✕</button>
+            </div>
+            {rowErr[en.id] && <p className="text-sm text-red-400">{rowErr[en.id]}</p>}
+            {en.nutrition && open[en.id] && (
+              <div className="space-y-2 rounded bg-neutral-800/60 p-2 text-sm">
+                <div className="flex items-start gap-2">
+                  <span className={`rounded px-2 py-0.5 text-xs uppercase ${VERDICT_STYLE[en.nutrition.advice.verdict]}`}>{en.nutrition.advice.verdict}</span>
+                  <p className="flex-1 text-neutral-300">{en.nutrition.advice.summary}</p>
+                </div>
+                {en.nutrition.advice.swap && <p className="text-xs text-amber-400">Swap: {en.nutrition.advice.swap}</p>}
+                <div className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-400">
+                  {PANEL_ROWS.map(([label, get, unit]) => (
+                    <div key={label} className="flex justify-between"><span>{label}</span><span className="text-neutral-300">{Math.round(get(en.nutrition!) * 10) / 10}{unit}</span></div>
+                  ))}
+                </div>
+                <p className="text-[10px] text-neutral-500">AI estimate, anchored to your logged kcal/protein — not label values.</p>
+              </div>
+            )}
           </li>
         ))}
       </ul>
