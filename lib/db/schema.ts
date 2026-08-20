@@ -71,3 +71,11 @@ export const settings = pgTable("settings", {
   calorieTarget: integer("calorie_target").notNull(),
   proteinTarget: integer("protein_target").notNull(),
 });
+
+export const coachReviews = pgTable("coach_reviews", {
+  id: serial("id").primaryKey(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  periodStart: date("period_start").notNull(),
+  periodEnd: date("period_end").notNull(),
+  markdown: text("markdown").notNull(),
+});
