@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, lte, inArray } from "drizzle-orm";
+import { and, asc, eq, gte, isNull, lte, inArray } from "drizzle-orm";
 import { db } from "../db";
 import { exercises, foodPresets, workoutSessions, setLogs, dietEntries, cardioLogs, bodyMetrics, settings } from "../db/schema";
 import { lastSetsByExercise } from "../overload";
@@ -6,6 +6,7 @@ import { dayTypeForDate } from "../logic";
 import type { ParseContext } from "./parse-log";
 import type { CommitState } from "./commit";
 import type { ReviewInput } from "./review";
+import type { NutritionContext, NutritionPanel } from "./nutrition";
 
 export async function loadParseContext(date: string): Promise<ParseContext> {
   const dayType = dayTypeForDate(date);
@@ -62,4 +63,46 @@ export async function loadReviewInput(periodStart: string, periodEnd: string): P
     targets: { kcal: s?.calorieTarget ?? 2000, protein: s?.proteinTarget ?? 170 },
     sessions, sets, diet, cardio, metrics,
   };
+}
+
+export type DietEntryRow = typeof dietEntries.$inferSelect;
+
+export async function loadNutritionContext(entryId: number): Promise<{ entry: DietEntryRow; ctx: NutritionContext } | null> {
+  const rows = await db.select().from(dietEntries).where(eq(dietEntries.id, entryId));
+  const entry = rows[0];
+  if (!entry) return null;
+  const [dayRows, settingRows] = await Promise.all([
+    db.select({ kcal: dietEntries.kcal, proteinG: dietEntries.proteinG }).from(dietEntries).where(eq(dietEntries.date, entry.date)),
+    db.select().from(settings).where(eq(settings.id, 1)),
+  ]);
+  const s = settingRows[0];
+  const dayTotals = dayRows.reduce((a, r) => ({ kcal: a.kcal + r.kcal, proteinG: a.proteinG + r.proteinG }), { kcal: 0, proteinG: 0 });
+  return {
+    entry,
+    ctx: {
+      // Cap the name: it is user text going into the prompt, and older rows predate the input limit.
+      meal: { name: entry.name.slice(0, 120), kcal: entry.kcal, proteinG: entry.proteinG },
+      date: entry.date, dayTotals,
+      targets: { kcal: s?.calorieTarget ?? 2000, protein: s?.proteinTarget ?? 170 },
+    },
+  };
+}
+
+/**
+ * Persists the panel; backfills the row's carbs/fat only where the user left them empty.
+ * Guarded on the row still existing and still being unanalyzed, so a delete or a second
+ * concurrent analysis during the model call cannot be reported as a successful write.
+ * Returns false when nothing matched.
+ */
+export async function saveNutrition(entry: DietEntryRow, panel: NutritionPanel): Promise<boolean> {
+  // Claim the row. Fresh analysis only wins while nutrition is still null, so a concurrent
+  // writer cannot be overwritten; re-analysis of an unreadable stored panel heals it in place.
+  const claim = entry.nutrition === null
+    ? and(eq(dietEntries.id, entry.id), isNull(dietEntries.nutrition))
+    : eq(dietEntries.id, entry.id);
+  const rows = await db.update(dietEntries)
+    .set({ nutrition: panel, carbsG: entry.carbsG ?? panel.macros.carbsG, fatG: entry.fatG ?? panel.macros.fatG })
+    .where(claim)
+    .returning({ id: dietEntries.id });
+  return rows.length > 0;
 }

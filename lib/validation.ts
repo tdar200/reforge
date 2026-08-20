@@ -2,9 +2,10 @@ import { z } from "zod";
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 export const DietEntryInput = z.object({
-  date: isoDate, name: z.string().min(1),
-  kcal: z.number().int().nonnegative(),
-  proteinG: z.number().nonnegative(),
+  // Bounds match MealProposal in lib/ai/schemas.ts so the manual and AI paths agree.
+  date: isoDate, name: z.string().min(1).max(120),
+  kcal: z.number().int().min(0).max(5000),
+  proteinG: z.number().min(0).max(500),
   carbsG: z.number().nonnegative().nullish(),
   fatG: z.number().nonnegative().nullish(),
 });
