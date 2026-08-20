@@ -1,9 +1,9 @@
-import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
 
-export const MODEL_ID = "claude-sonnet-5";
+export const MODEL_ID = "gpt-5-mini";
 
 export function aiConfigured(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
+  return Boolean(process.env.OPENAI_API_KEY);
 }
 
 /** 503 response when the AI key is missing; null when configured. Call first in every AI route. */
@@ -14,6 +14,6 @@ export function aiUnavailable(): Response | null {
 
 /** Built lazily so importing this module never requires the key. */
 export function getModel() {
-  const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  return anthropic(MODEL_ID);
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return openai(MODEL_ID);
 }

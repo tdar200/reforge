@@ -58,7 +58,6 @@ export async function parseQuickLog(text: string, ctx: ParseContext): Promise<Pa
     system: buildParseSystemPrompt(ctx),
     prompt: text,
     output: Output.object({ schema: ParsedLog }),
-    temperature: 0,
   });
   return sanitizeParsed(ParsedLog.parse(result.output), ctx);
 }

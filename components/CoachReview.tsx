@@ -44,7 +44,7 @@ export function CoachReview() {
     finally { setBusy(false); }
   }
 
-  if (!configured) return <section className="rounded bg-neutral-900 p-4 text-sm text-neutral-400">Weekly review needs <code>ANTHROPIC_API_KEY</code> on the server.</section>;
+  if (!configured) return <section className="rounded bg-neutral-900 p-4 text-sm text-neutral-400">Weekly review needs <code>OPENAI_API_KEY</code> on the server.</section>;
 
   return (
     <section className="rounded bg-neutral-900 p-4 space-y-3">

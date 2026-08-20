@@ -95,8 +95,8 @@ export async function generateWeeklyReview(ctx: CoachContext): Promise<string> {
     model: getModel(),
     system: REVIEW_SYSTEM_PROMPT,
     prompt: JSON.stringify(ctx),
-    temperature: 0.3,
-    maxOutputTokens: 600,
+    // Reasoning tokens count toward this cap on gpt-5 models; leave headroom above the ~250-word review.
+    maxOutputTokens: 2000,
   });
   return result.text.trim();
 }

@@ -53,7 +53,7 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
   }
   function remove(idx: number) { setItems((cur) => cur!.filter((_, i) => i !== idx)); }
 
-  if (!configured) return <section className="rounded bg-neutral-900 p-4 text-sm text-neutral-400">Quick log needs <code>ANTHROPIC_API_KEY</code> on the server.</section>;
+  if (!configured) return <section className="rounded bg-neutral-900 p-4 text-sm text-neutral-400">Quick log needs <code>OPENAI_API_KEY</code> on the server.</section>;
 
   const num = (v: number, onChange: (n: number) => void, step = "any") => (
     <input className="w-16 rounded bg-neutral-800 p-1 text-right" inputMode="decimal" step={step} value={v}
@@ -64,7 +64,7 @@ export function QuickLog({ date, onSaved }: { date: string; onSaved: () => void 
     <section className="rounded bg-neutral-900 p-4 space-y-3">
       <div className="flex items-baseline justify-between">
         <h2 className="font-semibold">Quick log</h2>
-        <span className="text-xs text-neutral-500">AI · Claude</span>
+        <span className="text-xs text-neutral-500">AI · GPT-5 mini</span>
       </div>
       <textarea className="w-full rounded bg-neutral-800 p-2 text-sm" rows={2} placeholder={EXAMPLE}
         value={text} onChange={(e) => setText(e.target.value)} maxLength={1000} />
