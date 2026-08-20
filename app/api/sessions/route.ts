@@ -7,6 +7,7 @@ import { SessionInput } from "@/lib/validation";
 export async function GET(req: Request) {
   const unauth = await requireAuth(req); if (unauth) return unauth;
   const date = new URL(req.url).searchParams.get("date");
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return Response.json({ error: "bad request" }, { status: 400 });
   const rows = date
     ? await db.select().from(workoutSessions).where(eq(workoutSessions.date, date))
     : await db.select().from(workoutSessions);

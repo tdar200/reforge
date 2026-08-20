@@ -7,6 +7,11 @@ export async function POST(req: Request) {
   const unauth = await requireAuth(req); if (unauth) return unauth;
   const parsed = SetLogInput.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return Response.json({ error: "bad request" }, { status: 400 });
-  const [row] = await db.insert(setLogs).values(parsed.data).returning();
-  return Response.json(row, { status: 201 });
+  try {
+    const [row] = await db.insert(setLogs).values(parsed.data).returning();
+    return Response.json(row, { status: 201 });
+  } catch (e) {
+    if ((e as { code?: string }).code === "23503") return Response.json({ error: "bad request" }, { status: 400 });
+    throw e;
+  }
 }

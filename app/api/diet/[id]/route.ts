@@ -6,6 +6,8 @@ import { requireAuth } from "@/lib/auth";
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const unauth = await requireAuth(req); if (unauth) return unauth;
   const { id } = await params;
-  await db.delete(dietEntries).where(eq(dietEntries.id, Number(id)));
+  const entryId = Number(id);
+  if (!Number.isInteger(entryId)) return Response.json({ error: "bad request" }, { status: 400 });
+  await db.delete(dietEntries).where(eq(dietEntries.id, entryId));
   return Response.json({ ok: true });
 }
