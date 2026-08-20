@@ -120,7 +120,7 @@ test("non-JSON model output throws NoObjectGeneratedError", async () => {
   expect(NoObjectGeneratedError.isInstance(err)).toBe(true);
 });
 
-test("sends NUTRITION_SYSTEM_PROMPT, JSON.stringify(ctx) as prompt, and maxOutputTokens 2500", async () => {
+test("sends NUTRITION_SYSTEM_PROMPT, JSON.stringify(ctx) as prompt, and maxOutputTokens 6000", async () => {
   model = new MockLanguageModelV3({ doGenerate: textResult(JSON.stringify(validPanel())) });
   await analyzeMeal(ctx);
   expect(model.doGenerateCalls).toHaveLength(1);
@@ -130,6 +130,6 @@ test("sends NUTRITION_SYSTEM_PROMPT, JSON.stringify(ctx) as prompt, and maxOutpu
     role: "user",
     content: [{ type: "text", text: JSON.stringify(ctx) }],
   });
-  expect(call.maxOutputTokens).toBe(2500);
+  expect(call.maxOutputTokens).toBe(6000);
   expect(call.responseFormat?.type).toBe("json");
 });

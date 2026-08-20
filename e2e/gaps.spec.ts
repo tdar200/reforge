@@ -294,7 +294,7 @@ test("CoachReview: mocked review pins the Markdown renderer (headings, bullets, 
   expect(await md.locator("ul").nth(1).locator("li").allTextContents()).toEqual(["protein on target"]);
 });
 
-test("/diet: manual add form (blank numbers -> 0), Save preset, and per-entry delete with totals refresh", async ({ page }) => {
+test("/diet: manual add form (blank numbers are estimated), Save preset, and per-entry delete with totals refresh", async ({ page }) => {
   await pin(page, DIET_DATE);
   await login(page);
   await page.goto("/diet");
@@ -313,18 +313,22 @@ test("/diet: manual add form (blank numbers -> 0), Save preset, and per-entry de
   let presetPosts = 0;
   page.on("request", (r) => { if (new URL(r.url()).pathname === "/api/presets" && r.method() === "POST") presetPosts++; });
 
-  // manual add leaving kcal/protein blank: Number("") -> 0 goes to the API
+  // manual add leaving kcal/protein blank: the estimate fills them in, 0 never reaches the API
+  await page.route("**/api/ai/estimate", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ kcal: 140, proteinG: 4 }) }));
   const food = page.getByPlaceholder("Food");
   await food.fill("E2E gap food");
+  const estReq = page.waitForRequest((r) => r.url().endsWith("/api/ai/estimate") && r.method() === "POST");
   const blankReq = page.waitForRequest((r) => r.url().endsWith("/api/diet") && r.method() === "POST");
   const blankRes = page.waitForResponse((r) => r.url().endsWith("/api/diet") && r.request().method() === "POST");
   await page.getByRole("button", { name: "Add", exact: true }).click();
-  expect((await blankReq).postDataJSON()).toEqual({ date: DIET_DATE, name: "E2E gap food", kcal: 0, proteinG: 0 });
+  expect((await estReq).postDataJSON()).toEqual({ name: "E2E gap food" });
+  expect((await blankReq).postDataJSON()).toEqual({ date: DIET_DATE, name: "E2E gap food", kcal: 140, proteinG: 4 });
   expect((await blankRes).status()).toBe(201);
   const blankRow = page.locator("main ul > li").filter({ hasText: "E2E gap food" });
   await expect(blankRow).toHaveCount(1);
-  await expect(blankRow.getByText("0kcal · 0g", { exact: true })).toBeVisible();
-  await totals(0, 0);
+  await expect(blankRow.getByText("140kcal · 4g", { exact: true })).toBeVisible();
+  await totals(140, 4);
   await expect(food).toHaveValue(""); // form resets after Add
 
   // manual add with numbers updates list and totals
@@ -337,7 +341,7 @@ test("/diet: manual add form (blank numbers -> 0), Save preset, and per-entry de
   expect(mealRow).toMatchObject({ date: DIET_DATE, name: "E2E gap meal", kcal: 321, proteinG: 21 });
   await expect(page.locator("main ul > li")).toHaveCount(2);
   await expect(page.locator("main ul > li").filter({ hasText: "E2E gap meal" }).getByText("321kcal · 21g", { exact: true })).toBeVisible();
-  await totals(321, 21);
+  await totals(461, 25);
 
   // Save preset with an empty name is a no-op (no POST fired)
   await page.getByRole("button", { name: "Save preset", exact: true }).click();
@@ -362,9 +366,10 @@ test("/diet: manual add form (blank numbers -> 0), Save preset, and per-entry de
   await page.locator("main ul > li").filter({ hasText: "E2E gap meal" }).getByRole("button", { name: "✕" }).click();
   expect((await delRes).status()).toBe(200);
   await expect(page.locator("main ul > li")).toHaveCount(1);
-  await totals(0, 0);
+  await totals(140, 4); // the estimated row survives the delete
   await blankRow.getByRole("button", { name: "✕" }).click();
   await expect(page.locator("main ul > li")).toHaveCount(0);
+  await totals(0, 0);
 });
 
 test("/workout on a pinned Saturday renders the rest-day branch", async ({ page }) => {

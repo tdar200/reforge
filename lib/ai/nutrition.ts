@@ -47,11 +47,17 @@ export const NUTRITION_SYSTEM_PROMPT = [
   "The JSON you receive has one logged meal, the day's totals so far (this meal included), and the daily targets.",
   "Estimate a full per-serving nutrition panel for the meal. When the name reads like a branded, chain, or shop-bought item, use typical UK supermarket portions.",
   "Anchor everything to the logged kcal and proteinG: keep those two values as given and scale every other estimate to be consistent with them.",
+  "Exception: when the logged kcal AND proteinG are both 0 they are UNKNOWN, not zero — estimate the real values for one typical serving instead of anchoring to zero.",
   "These are best estimates, not label values — always produce numbers, never refuse.",
   "verdict: 'good' if the meal fits the remaining day budget with solid protein density and reasonable saturated fat, sugar and salt; 'poor' if it clearly works against the targets; otherwise 'ok'.",
   "summary: one or two plain sentences quoting actual numbers from this data.",
   "swap: ONE concrete alternative from the same shop or context that would improve the verdict, with its rough kcal/protein; null if the meal is already a good pick.",
 ].join("\n");
+
+/** A meal logged as 0 kcal and 0 protein records no macros — treat them as unknown, not zero. */
+export function macrosUnknown(meal: { kcal: number; proteinG: number }): boolean {
+  return meal.kcal === 0 && meal.proteinG === 0;
+}
 
 export async function analyzeMeal(ctx: NutritionContext): Promise<NutritionPanel> {
   const result = await generateText({
@@ -59,15 +65,16 @@ export async function analyzeMeal(ctx: NutritionContext): Promise<NutritionPanel
     system: NUTRITION_SYSTEM_PROMPT,
     prompt: JSON.stringify(ctx),
     output: Output.object({ schema: NutritionPanel }),
-    // Reasoning tokens count toward this cap on gpt-5 models; leave headroom above the panel.
-    maxOutputTokens: 2500,
+    // Reasoning tokens count toward this cap on gpt-5 models, and a 22-field panel leaves
+    // little room: 2500 intermittently ran out mid-reasoning and produced no output at all.
+    maxOutputTokens: 6000,
   });
   const raw = NutritionPanel.parse(result.output);
   // Logged values are authoritative — pin them so the row and its panel never disagree,
-  // then re-validate so a pinned panel can never escape the schema's own bounds.
-  return NutritionPanel.parse({
-    ...raw,
-    estimated: true,
-    macros: { ...raw.macros, kcal: ctx.meal.kcal, proteinG: ctx.meal.proteinG },
-  });
+  // then re-validate so a pinned panel can never escape the schema's own bounds. A row with
+  // no macros at all has nothing to pin, so the estimate stands and the caller writes it back.
+  const macros = macrosUnknown(ctx.meal)
+    ? raw.macros
+    : { ...raw.macros, kcal: ctx.meal.kcal, proteinG: ctx.meal.proteinG };
+  return NutritionPanel.parse({ ...raw, estimated: true, macros });
 }

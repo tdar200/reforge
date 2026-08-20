@@ -6,7 +6,7 @@ import { dayTypeForDate } from "../logic";
 import type { ParseContext } from "./parse-log";
 import type { CommitState } from "./commit";
 import type { ReviewInput } from "./review";
-import type { NutritionContext, NutritionPanel } from "./nutrition";
+import { macrosUnknown, type NutritionContext, type NutritionPanel } from "./nutrition";
 
 export async function loadParseContext(date: string): Promise<ParseContext> {
   const dayType = dayTypeForDate(date);
@@ -101,7 +101,13 @@ export async function saveNutrition(entry: DietEntryRow, panel: NutritionPanel):
     ? and(eq(dietEntries.id, entry.id), isNull(dietEntries.nutrition))
     : eq(dietEntries.id, entry.id);
   const rows = await db.update(dietEntries)
-    .set({ nutrition: panel, carbsG: entry.carbsG ?? panel.macros.carbsG, fatG: entry.fatG ?? panel.macros.fatG })
+    .set({
+      nutrition: panel,
+      carbsG: entry.carbsG ?? panel.macros.carbsG,
+      fatG: entry.fatG ?? panel.macros.fatG,
+      // A row logged without macros gets the analysis's estimate, so the day's totals stop reading 0.
+      ...(macrosUnknown(entry) ? { kcal: panel.macros.kcal, proteinG: panel.macros.proteinG } : {}),
+    })
     .where(claim)
     .returning({ id: dietEntries.id });
   return rows.length > 0;

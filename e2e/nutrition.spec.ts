@@ -532,6 +532,308 @@ test("Panel numbers round to one decimal: repeating floats never reach the DOM",
   await expect(row.getByText("3.3333333333333335")).toHaveCount(0);
 });
 
+// ---------------------------------------------------------------------------
+// Manual Add form: a blank kcal/protein box is filled in by POST /api/ai/estimate.
+// Regression guard for the "Actileaf oat drink logged as 0 kcal / 0 protein" bug,
+// where Number("") === 0 silently reached the API.
+// ---------------------------------------------------------------------------
+
+const HINT = "Leave kcal or protein blank and the coach estimates them from the name.";
+const EST_ERR_KEY = "Estimating needs OPENAI_API_KEY — type the numbers instead.";
+const EST_ERR_FAIL = "Couldn't estimate that — type the numbers instead.";
+
+const foodInput = (page: Page) => page.getByPlaceholder("Food");
+const kcalInput = (page: Page) => page.getByPlaceholder("kcal");
+const proteinInput = (page: Page) => page.getByPlaceholder("protein");
+const addBtn = (page: Page) => page.getByRole("button", { name: "Add", exact: true });
+const estimatingBtn = (page: Page) => page.getByRole("button", { name: "Estimating…", exact: true });
+// The form-level error sits directly under <main>; row errors live inside main ul > li.
+const formErrLine = (page: Page) => page.locator("main > p.text-red-400");
+
+const isPost = (r: Request, pathname: string) =>
+  r.method() === "POST" && new URL(r.url()).pathname === pathname;
+const dietPost = (r: Request) => isPost(r, "/api/diet");
+const estimatePost = (r: Request) => isPost(r, "/api/ai/estimate");
+
+/** Reads the live targets so the totals line is asserted verbatim, not against a hardcoded goal. */
+async function totalsOf(page: Page) {
+  const res = await page.request.get("/api/settings");
+  expect(res.status()).toBe(200);
+  const s = (await res.json()) as { calorieTarget: number; proteinTarget: number };
+  return (kcal: number, proteinG: number) => Promise.all([
+    expect(page.getByText(`${kcal} / ${s.calorieTarget} kcal`, { exact: true })).toBeVisible(),
+    expect(page.getByText(`${proteinG} / ${s.proteinTarget} g protein`, { exact: true })).toBeVisible(),
+  ]);
+}
+
+/** Route-mock POST /api/ai/estimate; the returned array collects every request body it saw. */
+async function mockEstimate(page: Page, status: number, body: unknown) {
+  const seen: unknown[] = [];
+  await page.route("**/api/ai/estimate", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    seen.push(route.request().postDataJSON());
+    await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+  });
+  return seen;
+}
+
+/** Gated estimate: stays in flight until release() runs, so "Estimating…" can never lose a race. */
+async function mockEstimateGated(page: Page, body: unknown) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/ai/estimate", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await gate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+  return () => release();
+}
+
+function countRequests(page: Page, match: (r: Request) => boolean): { n: number } {
+  const counter = { n: 0 };
+  page.on("request", (r) => { if (match(r)) counter.n++; });
+  return counter;
+}
+
+test("The Add form carries the blank-estimate hint", async ({ page }) => {
+  await openDiet(page, []);
+  await expect(page.getByText(HINT, { exact: true })).toBeVisible();
+  await expect(page.locator("main > p").filter({ hasText: HINT })).toHaveCount(1);
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("Add with kcal and protein blank: the estimate fills both, into the row and the day totals", async ({ page }) => {
+  const NAME = "E2E est blank both";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  await totals(0, 0);
+  const seen = await mockEstimate(page, 200, { kcal: 210, proteinG: 7 });
+
+  await foodInput(page).fill(NAME);
+  await expect(kcalInput(page)).toHaveValue("");
+  await expect(proteinInput(page)).toHaveValue("");
+
+  const estReq = page.waitForRequest(estimatePost);
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await estReq).postDataJSON()).toEqual({ name: NAME }); // exactly {name}, nothing else
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 210, proteinG: 7 });
+  expect((await dietRes).status()).toBe(201);
+  expect(seen).toEqual([{ name: NAME }]);
+
+  const row = rowFor(page, NAME);
+  await expect(page.locator("main ul > li")).toHaveCount(1);
+  await expect(row.getByText("210kcal · 7g", { exact: true })).toBeVisible();
+  await totals(210, 7);
+
+  await expect(foodInput(page)).toHaveValue(""); // form resets after a successful Add
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("Add with one number blank: the estimate fills only that box, the typed one wins", async ({ page }) => {
+  const KCAL_BLANK = "E2E est kcal blank";
+  const PROTEIN_BLANK = "E2E est protein blank";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const seen = await mockEstimate(page, 200, { kcal: 300, proteinG: 99 });
+
+  // kcal blank, protein typed: 300 from the estimate, 12 from the box (99 is ignored)
+  await foodInput(page).fill(KCAL_BLANK);
+  await proteinInput(page).fill("12");
+  let estReq = page.waitForRequest(estimatePost);
+  let dietReq = page.waitForRequest(dietPost);
+  let dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await estReq).postDataJSON()).toEqual({ name: KCAL_BLANK });
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: KCAL_BLANK, kcal: 300, proteinG: 12 });
+  expect((await dietRes).status()).toBe(201);
+  await expect(rowFor(page, KCAL_BLANK).getByText("300kcal · 12g", { exact: true })).toBeVisible();
+  await expect(page.getByText("300kcal · 99g")).toHaveCount(0);
+  await totals(300, 12);
+
+  // mirror: protein blank, kcal typed: 150 from the box, 99 from the estimate
+  await foodInput(page).fill(PROTEIN_BLANK);
+  await kcalInput(page).fill("150");
+  estReq = page.waitForRequest(estimatePost);
+  dietReq = page.waitForRequest(dietPost);
+  dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await estReq).postDataJSON()).toEqual({ name: PROTEIN_BLANK });
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: PROTEIN_BLANK, kcal: 150, proteinG: 99 });
+  expect((await dietRes).status()).toBe(201);
+  await expect(rowFor(page, PROTEIN_BLANK).getByText("150kcal · 99g", { exact: true })).toBeVisible();
+  await expect(page.getByText("300kcal · 99g")).toHaveCount(0);
+  await totals(450, 111);
+
+  expect(seen).toEqual([{ name: KCAL_BLANK }, { name: PROTEIN_BLANK }]);
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("A typed 0 is respected, never estimated: the row posts kcal 0 and protein 0", async ({ page }) => {
+  const NAME = "E2E est typed zero";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const estimates = countRequests(page, estimatePost);
+  await mockEstimate(page, 200, { kcal: 210, proteinG: 7 }); // armed, and must never fire
+
+  await foodInput(page).fill(NAME);
+  await kcalInput(page).fill("0");
+  await proteinInput(page).fill("0");
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 0, proteinG: 0 });
+  expect((await dietRes).status()).toBe(201);
+  await expect(rowFor(page, NAME).getByText("0kcal · 0g", { exact: true })).toBeVisible();
+  await totals(0, 0);
+  await expect(estimatingBtn(page)).toHaveCount(0);
+  await expect(formErrLine(page)).toHaveCount(0);
+
+  await page.waitForTimeout(500); // let any stray request land before counting
+  expect(estimates.n).toBe(0);
+});
+
+test("Estimating…: the Add button is disabled while the estimate is in flight, then reads Add again", async ({ page }) => {
+  const NAME = "E2E est gated";
+  await openDiet(page, []);
+  const release = await mockEstimateGated(page, { kcal: 210, proteinG: 7 });
+
+  await foodInput(page).fill(NAME);
+  await expect(addBtn(page)).toBeEnabled();
+  await addBtn(page).click();
+
+  // Held by the gate: the label swaps and the button cannot be pressed again.
+  await expect(estimatingBtn(page)).toBeVisible();
+  await expect(estimatingBtn(page)).toBeDisabled();
+  await expect(addBtn(page)).toHaveCount(0);
+  await expect(page.locator("main ul > li")).toHaveCount(0); // nothing posted yet
+  await expect(estimatingBtn(page)).toBeDisabled(); // still held, nothing raced it back on
+
+  release();
+
+  await expect(addBtn(page)).toBeVisible();
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(estimatingBtn(page)).toHaveCount(0);
+  await expect(rowFor(page, NAME).getByText("210kcal · 7g", { exact: true })).toBeVisible();
+  await expect(formErrLine(page)).toHaveCount(0);
+});
+
+test("Estimate 503: the OPENAI_API_KEY notice shows, the typed name survives and no row is created", async ({ page }) => {
+  const NAME = "E2E est keyless";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const diets = countRequests(page, dietPost);
+  await mockEstimate(page, 503, { error: "ai_not_configured" });
+
+  await foodInput(page).fill(NAME);
+  const res = page.waitForResponse((r) => estimatePost(r.request()));
+  await addBtn(page).click();
+  expect((await res).status()).toBe(503);
+
+  await expect(formErrLine(page)).toHaveText(EST_ERR_KEY);
+  await expect(page.getByText(EST_ERR_KEY, { exact: true })).toBeVisible();
+  await expect(page.getByText(EST_ERR_FAIL)).toHaveCount(0);
+  await expect(page.locator("main ul > li")).toHaveCount(0); // no row on a failed estimate
+  await totals(0, 0);
+  await expect(addBtn(page)).toBeEnabled(); // out of the Estimating… state, retryable
+  await expect(estimatingBtn(page)).toHaveCount(0);
+  await expect(foodInput(page)).toHaveValue(NAME); // the form keeps what was typed
+  await expect(page.getByText(HINT, { exact: true })).toBeVisible();
+
+  await page.waitForTimeout(500); // let any stray request land before counting
+  expect(diets.n).toBe(0);
+});
+
+test("Estimate 502: the retry notice shows, then typing the numbers by hand still adds and clears it", async ({ page }) => {
+  const NAME = "E2E est boom";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const diets = countRequests(page, dietPost);
+  const estimates = countRequests(page, estimatePost);
+  await mockEstimate(page, 502, { error: "estimate_failed" });
+
+  await foodInput(page).fill(NAME);
+  await proteinInput(page).fill("31"); // one blank box is enough to trigger the estimate
+  const res = page.waitForResponse((r) => estimatePost(r.request()));
+  await addBtn(page).click();
+  expect((await res).status()).toBe(502);
+
+  await expect(formErrLine(page)).toHaveText(EST_ERR_FAIL);
+  await expect(page.getByText(EST_ERR_FAIL, { exact: true })).toBeVisible();
+  await expect(page.getByText(EST_ERR_KEY)).toHaveCount(0);
+  await expect(page.locator("main ul > li")).toHaveCount(0);
+  await totals(0, 0);
+  await page.waitForTimeout(500);
+  expect(diets.n).toBe(0);
+  expect(estimates.n).toBe(1);
+
+  // Recovery: fill the missing number in, and the manual path works with the error cleared.
+  await expect(foodInput(page)).toHaveValue(NAME);
+  await expect(proteinInput(page)).toHaveValue("31");
+  await kcalInput(page).fill("410");
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 410, proteinG: 31 });
+  expect((await dietRes).status()).toBe(201);
+
+  await expect(rowFor(page, NAME).getByText("410kcal · 31g", { exact: true })).toBeVisible();
+  await totals(410, 31);
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(page.getByText(EST_ERR_FAIL)).toHaveCount(0);
+  await expect(foodInput(page)).toHaveValue("");
+  expect(estimates.n).toBe(1); // both numbers present: no second estimate call
+});
+
+test("Blank or whitespace-only Food: Add fires no request at all", async ({ page }) => {
+  await openDiet(page, []);
+  const apiCalls = countRequests(page, (r) => new URL(r.url()).pathname.startsWith("/api/"));
+  await mockEstimate(page, 200, { kcal: 210, proteinG: 7 }); // armed, and must never fire
+
+  await expect(foodInput(page)).toHaveValue("");
+  await addBtn(page).click();
+  await page.waitForTimeout(600);
+  expect(apiCalls.n).toBe(0);
+
+  await foodInput(page).fill("   "); // whitespace only, trimmed away by the form
+  await addBtn(page).click();
+  await page.waitForTimeout(600);
+  expect(apiCalls.n).toBe(0);
+
+  // Numbers alone are not enough either.
+  await kcalInput(page).fill("500");
+  await proteinInput(page).fill("40");
+  await addBtn(page).click();
+  await page.waitForTimeout(600);
+  expect(apiCalls.n).toBe(0);
+
+  await expect(page.locator("main ul > li")).toHaveCount(0);
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(estimatingBtn(page)).toHaveCount(0);
+  await expect(addBtn(page)).toBeEnabled();
+});
+
+test("Analyze on a 0/0 row: the panel macros replace the row numbers and the totals follow", async ({ page }) => {
+  const NAME = "E2E est unknown macros";
+  await openDiet(page, [{ name: NAME, kcal: 0, proteinG: 0 }]);
+  const totals = await totalsOf(page);
+  const row = rowFor(page, NAME);
+  await expect(row.getByText("0kcal · 0g", { exact: true })).toBeVisible();
+  await totals(0, 0);
+
+  await mockNutrition(page, () => ({ status: 201, body: { nutrition: PANEL } }));
+  await analyzeBtn(row).click();
+
+  await expectFullPanel(row, PANEL);
+  await expect(row.getByText("640kcal · 42g", { exact: true })).toBeVisible();
+  await expect(page.getByText("0kcal · 0g")).toHaveCount(0);
+  await totals(640, 42);
+});
+
 test("AI_LIVE: a UI-created meal analyzes for real and renders the full panel", async ({ page }) => {
   test.skip(!AI_LIVE, "needs live OpenAI quota (set AI_LIVE)");
   test.setTimeout(180_000);

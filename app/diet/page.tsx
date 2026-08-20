@@ -33,6 +33,8 @@ export default function Diet() {
   const [open, setOpen] = useState<Record<number, boolean>>({});
   const [busy, setBusy] = useState<number | null>(null);
   const [rowErr, setRowErr] = useState<Record<number, string>>({});
+  const [estimating, setEstimating] = useState(false);
+  const [formErr, setFormErr] = useState("");
 
   // Generation guard: overlapping loads can resolve out of order and an older
   // response would otherwise wipe a freshly analyzed panel out of client state.
@@ -57,7 +59,25 @@ export default function Diet() {
   }
   async function addFromForm(e: React.FormEvent) {
     e.preventDefault();
-    await add(form.name, Number(form.kcal), Number(form.proteinG));
+    const name = form.name.trim();
+    if (!name) return;
+    let kcal = Number(form.kcal);
+    let proteinG = Number(form.proteinG);
+    setFormErr("");
+    if (!form.kcal.trim() || !form.proteinG.trim()) {
+      setEstimating(true);
+      try {
+        const res = await fetch("/api/ai/estimate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+        if (res.status === 401) { window.location.href = "/login"; return; }
+        if (res.status === 503) { setFormErr("Estimating needs OPENAI_API_KEY — type the numbers instead."); return; }
+        if (!res.ok) { setFormErr("Couldn't estimate that — type the numbers instead."); return; }
+        const est = (await res.json()) as { kcal: number; proteinG: number };
+        if (!form.kcal.trim()) kcal = est.kcal;
+        if (!form.proteinG.trim()) proteinG = est.proteinG;
+      } catch { setFormErr("Network error."); return; }
+      finally { setEstimating(false); }
+    }
+    await add(name, kcal, proteinG);
     setForm({ name: "", kcal: "", proteinG: "" });
   }
   async function savePreset() {
@@ -82,7 +102,7 @@ export default function Diet() {
       if (res.status === 503) { setRowErr((r) => ({ ...r, [en.id]: "Needs OPENAI_API_KEY on the server." })); return; }
       if (!res.ok) { setRowErr((r) => ({ ...r, [en.id]: "Analysis failed — try again." })); return; }
       const { nutrition } = (await res.json()) as { nutrition: Panel };
-      setEntries((cur) => cur.map((e) => (e.id === en.id ? { ...e, nutrition } : e)));
+      setEntries((cur) => cur.map((e) => (e.id === en.id ? { ...e, nutrition, kcal: nutrition.macros.kcal, proteinG: nutrition.macros.proteinG } : e)));
       setOpen((o) => ({ ...o, [en.id]: true }));
     } catch { setRowErr((r) => ({ ...r, [en.id]: "Network error." })); }
     finally { setBusy(null); }
@@ -100,9 +120,11 @@ export default function Diet() {
         <input className="col-span-4 rounded bg-neutral-800 p-2" placeholder="Food" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         <input className="rounded bg-neutral-800 p-2" inputMode="numeric" placeholder="kcal" value={form.kcal} onChange={(e) => setForm({ ...form, kcal: e.target.value })} />
         <input className="rounded bg-neutral-800 p-2" inputMode="numeric" placeholder="protein" value={form.proteinG} onChange={(e) => setForm({ ...form, proteinG: e.target.value })} />
-        <button className="rounded bg-green-600 p-2">Add</button>
+        <button disabled={estimating} className="rounded bg-green-600 p-2 disabled:opacity-50">{estimating ? "Estimating…" : "Add"}</button>
         <button type="button" onClick={savePreset} className="rounded bg-neutral-700 p-2">Save preset</button>
       </form>
+      <p className="-mt-2 text-xs text-neutral-500">Leave kcal or protein blank and the coach estimates them from the name.</p>
+      {formErr && <p className="-mt-2 text-sm text-red-400">{formErr}</p>}
 
       {presets.length > 0 && (
         <div className="flex flex-wrap gap-2">
