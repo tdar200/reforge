@@ -1257,6 +1257,218 @@ test("A rejected save keeps the label note beside the error", async ({ page }) =
   await expect(addBtn(page)).toBeEnabled();
 });
 
+// ---------------------------------------------------------------------------
+// Dropped requests: the client bounds every AI POST with a 45 s timeout and retries
+// a *thrown* request exactly once. Regression guard for the "Network error." report,
+// where a 7-14 s estimate plus one blip on the wire ended the attempt outright.
+// A non-2xx is an answer, not a blip, so it is never retried.
+// ---------------------------------------------------------------------------
+
+// Verbatim app copy. The row line is not a prefix of the form line ("connection." vs
+// "connection, or"), so a non-exact match of one can never pick up the other.
+const EST_ERR_NET = "Couldn't reach the coach — check your connection, or type the numbers in.";
+const ROW_ERR_NET = "Couldn't reach the coach — check your connection.";
+
+const nutritionPost = (r: Request) => isPost(r, "/api/ai/nutrition");
+
+const FLAKY_BODY = { kcal: 275, proteinG: 19, source: "estimate", matchedName: null };
+
+/**
+ * Route-mock a POST endpoint that aborts its first `failures` requests and fulfils every
+ * later one. route.abort() is what a dropped connection looks like to the page: fetch
+ * rejects, which is the only failure postJson() is allowed to retry.
+ * The returned counter is the handler's own view, independent of the page event stream.
+ */
+async function mockPostFlaky(
+  page: Page,
+  pathname: string,
+  failures: number,
+  respond: () => { status: number; body: unknown },
+): Promise<{ n: number }> {
+  const state = { n: 0 };
+  await page.route(`**${pathname}`, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    state.n += 1;
+    if (state.n <= failures) return route.abort();
+    const { status, body } = respond();
+    await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+  });
+  return state;
+}
+
+test("Estimate dropped once: the retry succeeds, the row is added and no error is ever shown", async ({ page }) => {
+  const NAME = "E2E est retry once";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  await totals(0, 0);
+  const estimates = countRequests(page, estimatePost);
+  const handler = await mockPostFlaky(page, "/api/ai/estimate", 1, () => ({ status: 200, body: FLAKY_BODY }));
+
+  await foodInput(page).fill(NAME);
+  const dietReq = page.waitForRequest(dietPost);
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+
+  // The second attempt is the one that answers, and its numbers are the ones saved.
+  expect((await dietReq).postDataJSON()).toEqual({ date: DATE, name: NAME, kcal: 275, proteinG: 19 });
+  expect((await dietRes).status()).toBe(201);
+
+  const row = rowFor(page, NAME);
+  await expect(page.locator("main ul > li")).toHaveCount(1);
+  await expect(row.getByText("275kcal · 19g", { exact: true })).toBeVisible();
+  await totals(275, 19);
+  await expect(noteLine(page)).toHaveText(COACH_NOTE);
+
+  // The blip never reaches the user: no error line, and the form completed normally.
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(page.getByText(EST_ERR_NET)).toHaveCount(0);
+  await expect(page.getByText(EST_ERR_FAIL)).toHaveCount(0);
+  await expect(foodInput(page)).toHaveValue("");
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(estimatingBtn(page)).toHaveCount(0);
+
+  await page.waitForTimeout(500); // let any stray request land before counting
+  expect(handler.n).toBe(2); // dropped once, retried once: two attempts, one success
+  expect(estimates.n).toBe(2);
+});
+
+test("Estimate dropped twice: two attempts, the connection error, no row, and the typed values survive", async ({ page }) => {
+  const NAME = "E2E est retry exhausted";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const estimates = countRequests(page, estimatePost);
+  const diets = countRequests(page, dietPost);
+  const handler = await mockPostFlaky(page, "/api/ai/estimate", Infinity, () => ({ status: 200, body: FLAKY_BODY }));
+
+  await foodInput(page).fill(NAME);
+  await proteinInput(page).fill("31"); // one blank box is enough to trigger the estimate
+  await addBtn(page).click();
+
+  await expect(formErrLine(page)).toHaveText(EST_ERR_NET);
+  await expect(page.getByText(EST_ERR_NET, { exact: true })).toBeVisible();
+  await expect(formErrLine(page)).toHaveCount(1);
+  await expect(page.getByText(EST_ERR_FAIL)).toHaveCount(0); // not the non-2xx wording
+  await expect(page.getByText(EST_ERR_KEY)).toHaveCount(0);
+  await expect(page.getByText(ROW_ERR_NET, { exact: true })).toHaveCount(0); // form copy, not row copy
+
+  await expect(page.locator("main ul > li")).toHaveCount(0); // nothing saved on a dropped estimate
+  await totals(0, 0);
+  await expect(noteLine(page)).toHaveCount(0);
+  await expect(addBtn(page)).toBeEnabled(); // out of the Estimating… state, retryable
+  await expect(estimatingBtn(page)).toHaveCount(0);
+
+  // Every box keeps what was typed, so the numbers can be filled in by hand instead.
+  await expect(foodInput(page)).toHaveValue(NAME);
+  await expect(proteinInput(page)).toHaveValue("31");
+  await expect(kcalInput(page)).toHaveValue("");
+  await expect(page.getByText(HINT, { exact: true })).toBeVisible();
+
+  await page.waitForTimeout(500); // let any stray request land before counting
+  expect(handler.n).toBe(2); // two attempts total, never a third
+  expect(estimates.n).toBe(2);
+  expect(diets.n).toBe(0);
+
+  // Recovery: typing the missing number in saves without touching the estimate again.
+  await kcalInput(page).fill("410");
+  const dietRes = page.waitForResponse((r) => dietPost(r.request()));
+  await addBtn(page).click();
+  expect((await dietRes).status()).toBe(201);
+  await expect(rowFor(page, NAME).getByText("410kcal · 31g", { exact: true })).toBeVisible();
+  await totals(410, 31);
+  await expect(formErrLine(page)).toHaveCount(0);
+  await expect(page.getByText(EST_ERR_NET)).toHaveCount(0);
+  expect(handler.n).toBe(2);
+});
+
+test("Estimate 502 is an answer, not a blip: exactly one request, and the estimate error", async ({ page }) => {
+  const NAME = "E2E est no retry on 502";
+  await openDiet(page, []);
+  const totals = await totalsOf(page);
+  const estimates = countRequests(page, estimatePost);
+  const diets = countRequests(page, dietPost);
+  const seen = await mockEstimate(page, 502, { error: "estimate_failed" });
+
+  await foodInput(page).fill(NAME);
+  const res = page.waitForResponse((r) => estimatePost(r.request()));
+  await addBtn(page).click();
+  expect((await res).status()).toBe(502);
+
+  await expect(formErrLine(page)).toHaveText(EST_ERR_FAIL);
+  await expect(page.getByText(EST_ERR_FAIL, { exact: true })).toBeVisible();
+  await expect(page.getByText(EST_ERR_NET)).toHaveCount(0); // a served 502 is not a connection failure
+  await expect(page.locator("main ul > li")).toHaveCount(0);
+  await totals(0, 0);
+  await expect(addBtn(page)).toBeEnabled();
+  await expect(estimatingBtn(page)).toHaveCount(0);
+  await expect(foodInput(page)).toHaveValue(NAME);
+
+  await page.waitForTimeout(700); // long enough for a retry to have fired, if one existed
+  expect(estimates.n).toBe(1);
+  expect(seen).toEqual([{ name: NAME }]); // one body seen by the route, never a second
+  expect(diets.n).toBe(0);
+});
+
+test("Analyze dropped twice: that row shows the connection error after exactly two requests", async ({ page }) => {
+  await openDiet(page, [
+    { name: "E2E nutri dropped", kcal: 640, proteinG: 42 },
+    { name: "E2E nutri untouched", kcal: 200, proteinG: 5 },
+  ]);
+  const posts = countRequests(page, nutritionPost);
+  const handler = await mockPostFlaky(page, "/api/ai/nutrition", Infinity, () => ({ status: 201, body: { nutrition: PANEL } }));
+
+  const row = rowFor(page, "E2E nutri dropped");
+  const other = rowFor(page, "E2E nutri untouched");
+  await analyzeBtn(row).click();
+
+  await expect(row.getByText(ROW_ERR_NET, { exact: true })).toBeVisible();
+  await expect(errLineOf(row)).toHaveText(ROW_ERR_NET);
+  await expect(page.getByText(ROW_ERR_NET, { exact: true })).toHaveCount(1); // scoped to the clicked row
+  await expect(errLineOf(other)).toHaveCount(0);
+  await expect(page.getByText(ERR_FAIL)).toHaveCount(0); // not the non-2xx wording
+  await expect(page.getByText(ERR_KEY)).toHaveCount(0);
+
+  await expect(gridOf(row)).toHaveCount(0); // no panel on a dropped analysis
+  await expect(analyzeBtn(row)).toBeEnabled(); // out of Analyzing…, retryable
+  await expect(infoBtn(row)).toHaveCount(0);
+  await expect(analyzeBtn(other)).toBeEnabled();
+  await expect(deleteBtn(row)).toBeEnabled();
+
+  await page.waitForTimeout(500); // let any stray request land before counting
+  expect(handler.n).toBe(2); // two attempts total, never a third
+  expect(posts.n).toBe(2);
+
+  // Same endpoint, now healthy: the retry clears the stale line and renders the panel.
+  await page.unroute("**/api/ai/nutrition");
+  await mockNutrition(page, () => ({ status: 201, body: { nutrition: PANEL } }));
+  await analyzeBtn(row).click();
+
+  await expectFullPanel(row, PANEL);
+  await expect(errLineOf(row)).toHaveCount(0);
+  await expect(anyErrLine(page)).toHaveCount(0);
+  await expect(page.getByText(ROW_ERR_NET)).toHaveCount(0);
+  await expect(gridOf(other)).toHaveCount(0);
+});
+
+test("Analyze 502 is not retried: exactly one request, and the analysis error", async ({ page }) => {
+  await openDiet(page, [{ name: "E2E nutri 502 once", kcal: 700, proteinG: 25 }]);
+  const posts = countRequests(page, nutritionPost);
+  await mockNutrition(page, () => ({ status: 502, body: { error: "nutrition_failed" } }));
+
+  const row = rowFor(page, "E2E nutri 502 once");
+  const res = page.waitForResponse((r) => nutritionPost(r.request()));
+  await analyzeBtn(row).click();
+  expect((await res).status()).toBe(502);
+
+  await expect(row.getByText(ERR_FAIL, { exact: true })).toBeVisible();
+  await expect(errLineOf(row)).toHaveText(ERR_FAIL);
+  await expect(page.getByText(ROW_ERR_NET)).toHaveCount(0); // a served 502 is not a connection failure
+  await expect(gridOf(row)).toHaveCount(0);
+  await expect(analyzeBtn(row)).toBeEnabled();
+
+  await page.waitForTimeout(700); // long enough for a retry to have fired, if one existed
+  expect(posts.n).toBe(1);
+});
+
 test("AI_LIVE: a UI-created meal analyzes for real and renders the full panel", async ({ page }) => {
   test.skip(!AI_LIVE, "needs live OpenAI quota (set AI_LIVE)");
   test.setTimeout(180_000);

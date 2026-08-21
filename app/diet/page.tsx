@@ -24,6 +24,25 @@ const PANEL_ROWS: [string, (p: Panel) => number, string][] = [
   ["Zinc", (p) => p.micros.zinc_mg, "mg"],
 ];
 
+// The estimate calls a model, so it can take several seconds; one dropped request on a
+// slow connection should not end the attempt. Bounded, retried once, then reported honestly.
+async function postJson(url: string, body: unknown): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(45000),
+      });
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 type EstimateResponse = {
   kcal: number; proteinG: number;
   source?: "label" | "estimate";
@@ -91,7 +110,7 @@ export default function Diet() {
     if (!form.kcal.trim() || !form.proteinG.trim()) {
       setEstimating(true);
       try {
-        const res = await fetch("/api/ai/estimate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+        const res = await postJson("/api/ai/estimate", { name });
         if (res.status === 401) { window.location.href = "/login"; return; }
         if (res.status === 503) { setFormErr("Estimating needs OPENAI_API_KEY — type the numbers instead."); return; }
         if (!res.ok) { setFormErr("Couldn't estimate that — type the numbers instead."); return; }
@@ -99,7 +118,7 @@ export default function Diet() {
         if (!form.kcal.trim()) kcal = est.kcal;
         if (!form.proteinG.trim()) proteinG = est.proteinG;
         setFormNote(noteFor(est));
-      } catch { setFormErr("Network error."); return; }
+      } catch { setFormErr("Couldn't reach the coach — check your connection, or type the numbers in."); return; }
       finally { setEstimating(false); }
     }
     try {
@@ -127,14 +146,14 @@ export default function Diet() {
     if (en.nutrition) { setOpen((o) => ({ ...o, [en.id]: !o[en.id] })); return; }
     setBusy(en.id);
     try {
-      const res = await fetch("/api/ai/nutrition", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entryId: en.id }) });
+      const res = await postJson("/api/ai/nutrition", { entryId: en.id });
       if (res.status === 401) { window.location.href = "/login"; return; }
       if (res.status === 503) { setRowErr((r) => ({ ...r, [en.id]: "Needs OPENAI_API_KEY on the server." })); return; }
       if (!res.ok) { setRowErr((r) => ({ ...r, [en.id]: "Analysis failed — try again." })); return; }
       const { nutrition } = (await res.json()) as { nutrition: Panel };
       setEntries((cur) => cur.map((e) => (e.id === en.id ? { ...e, nutrition, kcal: nutrition.macros.kcal, proteinG: nutrition.macros.proteinG } : e)));
       setOpen((o) => ({ ...o, [en.id]: true }));
-    } catch { setRowErr((r) => ({ ...r, [en.id]: "Network error." })); }
+    } catch { setRowErr((r) => ({ ...r, [en.id]: "Couldn't reach the coach — check your connection." })); }
     finally { setBusy(null); }
   }
 

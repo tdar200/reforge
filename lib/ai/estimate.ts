@@ -23,6 +23,8 @@ export async function estimateMeal(name: string): Promise<MealEstimate> {
     system: ESTIMATE_SYSTEM_PROMPT,
     prompt: name.slice(0, 120),
     output: Output.object({ schema: MealEstimate }),
+    // Recall, not reasoning: minimal effort keeps this interactive call fast.
+    providerOptions: { openai: { reasoningEffort: "low" } },
     // Reasoning tokens count toward this cap on gpt-5 models.
     maxOutputTokens: 1500,
   });
@@ -42,6 +44,7 @@ export async function guessServingGrams(productName: string): Promise<number | n
       system: SERVING_SYSTEM_PROMPT,
       prompt: productName.slice(0, 120),
       output: Output.object({ schema: ServingGuess }),
+      providerOptions: { openai: { reasoningEffort: "low" } },
       maxOutputTokens: 1500,
     });
     return ServingGuess.parse(result.output).grams;
@@ -77,12 +80,22 @@ export type ResolvedMacros = MealEstimate & {
  * or, failing that, the model — so a real serving is never invented from nothing.
  */
 export async function resolveMacros(name: string): Promise<ResolvedMacros> {
-  const match = await searchFood(name);
+  // Concurrent, not chained. Chaining made one Add wait for up to three round trips
+  // (~14 s measured), a window long enough for an ordinary connection blip to drop the
+  // request. Asking for all three up front costs one extra small model call and bounds
+  // the wait at the slowest single call instead of their sum.
+  const [match, estimate, guessedServingG] = await Promise.all([
+    searchFood(name),
+    // A failed estimate no longer sinks the whole request: a label can still answer it.
+    estimateMeal(name).catch(() => null),
+    guessServingGrams(name),
+  ]);
+
   if (match) {
     const full = labelName(match.brand, match.productName);
-    // A junk serving_quantity (0 or blank) means the record has no usable portion, so ask.
+    // A junk serving_quantity (0 or blank) means the record has no usable portion.
     const fromLabel = match.servingQuantityG !== null && match.servingQuantityG > 0;
-    const servingG = fromLabel ? match.servingQuantityG! : await guessServingGrams(full);
+    const servingG = fromLabel ? match.servingQuantityG! : guessedServingG;
     if (servingG && servingG > 0) {
       // The label path bypasses the model, so it also bypasses the model's schema — clamp it
       // here or an oversized serving would produce a row the diet API rejects with a 400.
@@ -98,5 +111,7 @@ export async function resolveMacros(name: string): Promise<ResolvedMacros> {
       }
     }
   }
-  return { ...(await estimateMeal(name)), source: "estimate", matchedName: null, servingG: null, servingSource: null };
+
+  if (!estimate) throw new Error("no macros could be resolved");
+  return { ...estimate, source: "estimate", matchedName: null, servingG: null, servingSource: null };
 }

@@ -36,7 +36,7 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 | AI | Vercel AI SDK (`ai` v7) + `@ai-sdk/openai`, **GPT-5 mini** | see below |
 | DB | Neon Postgres + Drizzle ORM (`neon-http`) | serverless-friendly; migrations in repo |
 | Auth | passcode → HS256 JWT cookie (`jose`) | single-user app; enough to gate the API |
-| Tests | vitest + Playwright: 338 unit, 217 API integration, 64 e2e | see Testing below |
+| Tests | vitest + Playwright: 349 unit, 217 API integration, 69 e2e | see Testing below |
 
 ## How AI is used (and why GPT-5 mini)
 
@@ -72,6 +72,10 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
   Meal analysis claims its row before writing, so a meal deleted during the ~10 s model call returns 404 rather
   than reporting a save that never happened, and two concurrent analyses converge on one stored panel. Stored
   panels are re-validated on read: unreadable JSON is re-analyzed instead of served to the page.
+  Resolving a meal runs its lookup and both model calls concurrently rather than chained: serialised, one Add
+  waited on up to three round trips (~14 s measured), which was long enough for an ordinary connection blip to
+  drop it and surface as a bare network error. Concurrent plus low reasoning effort took it to ~4.5 s, and the
+  client retries a dropped request once before reporting it.
 
 ## Setup
 
@@ -84,13 +88,13 @@ Built for the Moonshot Partners technical challenge on top of a personal tracker
 
 ## Testing
 
-- `npm test` — 338 unit tests, no network or keys (the AI boundary is covered with the AI SDK mock model:
+- `npm test` — 349 unit tests, no network or keys (the AI boundary is covered with the AI SDK mock model:
   sanitizer branches, schema rejection, prompt and config assertions).
 - `npm run test:int` — 217 HTTP integration tests against a dev server (`PORT=3100 npm run dev`):
   every route × method × auth state (a 401 matrix over all endpoints), every Zod validation contract,
   cookie flags and JWT tampering/expiry, atomicity of the AI commit batch, and the documented
   same-date write race. Suites write only to far-future dates and clean up after themselves.
-- `npm run test:e2e` — 64 Playwright tests over all six screens: login, Today (QuickLog proposals via a
+- `npm run test:e2e` — 69 Playwright tests over all six screens: login, Today (QuickLog proposals via a
   mocked parse, error states that preserve the user's text, CoachReview markdown rendering), workout,
   diet, body, settings, plus the PWA manifest. Live-model happy paths are gated behind `AI_LIVE=1` and
   skip cleanly without it.
