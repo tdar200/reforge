@@ -9,7 +9,10 @@ import {
 } from "../nutrition";
 
 let model: MockLanguageModelV3;
-vi.mock("../model", () => ({ getModel: () => model }));
+vi.mock("../model", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../model")>()),
+  getModel: () => model,
+}));
 
 const textResult = (text: string) => ({
   content: [{ type: "text" as const, text }],

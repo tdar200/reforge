@@ -3,7 +3,10 @@ import { MockLanguageModelV3 } from "ai/test";
 import { generateWeeklyReview, REVIEW_SYSTEM_PROMPT, type CoachContext } from "../review";
 
 let model: MockLanguageModelV3;
-vi.mock("../model", () => ({ getModel: () => model }));
+vi.mock("../model", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../model")>()),
+  getModel: () => model,
+}));
 
 const textResult = (text: string) => ({
   content: [{ type: "text" as const, text }],

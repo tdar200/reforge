@@ -10,7 +10,10 @@ import {
 import type { FoodMatch, Per100 } from "../../food/openfoodfacts";
 
 let model: MockLanguageModelV3;
-vi.mock("../model", () => ({ getModel: () => model }));
+vi.mock("../model", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../model")>()),
+  getModel: () => model,
+}));
 
 /** The three lookups resolveMacros fires; they run concurrently, so none may assume an order. */
 type Lookup = "searchFood" | "estimateMeal" | "guessServingGrams";

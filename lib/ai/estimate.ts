@@ -1,6 +1,6 @@
 import { generateText, Output } from "ai";
 import { z } from "zod";
-import { getModel } from "./model";
+import { FAST_CALL_OPTIONS, getModel } from "./model";
 import { scaleToServing, searchFood } from "../food/openfoodfacts";
 
 // Bounds match MealProposal so an estimate is always a valid diet entry.
@@ -24,7 +24,7 @@ export async function estimateMeal(name: string): Promise<MealEstimate> {
     prompt: name.slice(0, 120),
     output: Output.object({ schema: MealEstimate }),
     // Recall, not reasoning: minimal effort keeps this interactive call fast.
-    providerOptions: { openai: { reasoningEffort: "low" } },
+    providerOptions: FAST_CALL_OPTIONS,
     // Reasoning tokens count toward this cap on gpt-5 models.
     maxOutputTokens: 1500,
   });
@@ -44,7 +44,7 @@ export async function guessServingGrams(productName: string): Promise<number | n
       system: SERVING_SYSTEM_PROMPT,
       prompt: productName.slice(0, 120),
       output: Output.object({ schema: ServingGuess }),
-      providerOptions: { openai: { reasoningEffort: "low" } },
+      providerOptions: FAST_CALL_OPTIONS,
       maxOutputTokens: 1500,
     });
     return ServingGuess.parse(result.output).grams;
