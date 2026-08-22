@@ -4,6 +4,7 @@ A small full-stack app that turns a scrappy gym log into structured data and gro
 Built for the Moonshot Partners technical challenge on top of a personal tracker I already used daily.
 
 **Live demo:** https://reforge-plum-gamma.vercel.app (passcode gated, ask me and I will send it)
+**Walkthrough:** https://youtu.be/iBNlmt0hT9Y (6 minutes)
 
 ## What it does
 
